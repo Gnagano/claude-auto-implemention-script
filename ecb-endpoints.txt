@@ -1,0 +1,16 @@
+# Configuration file for create_pr_from_endpoints.sh
+# Lines starting with # are treated as comments
+# Empty lines are ignored
+
+# GLOBAL CONFIGURATION SECTION
+# Use CONFIG: prefix for global configuration values
+CONFIG:SPREADSHEET_NAME=REST API - ECB
+CONFIG:WORKSHEET_NAME=UseCase
+CONFIG:REPO_PATH=/mnt/c/Users/admin/Documents/GitHub/kiaiGithub/europe_chartered_bank_backend
+
+# ENDPOINTS SECTION
+# Format: endpoint_id|md_destination_folder
+# Example: BE07-0201-12|vault/useCase/loan/loanRequest
+
+# Accumulation Endpoints
+BE14-0201-1101|vault/useCase/debit-cards/requests/replacement
