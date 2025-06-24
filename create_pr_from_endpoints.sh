@@ -225,9 +225,9 @@ usage() {
     echo "  CONFIG:SPREADSHEET_NAME=JCF REST API"
     echo "  CONFIG:WORKSHEET_NAME=UseCase"
     echo "  CONFIG:REPO_PATH=/path/to/repo"
-    echo "  BE07-0201-12|vault/useCase/loan/loanRequest"
-    echo "  BE07-0202-01|vault/useCase/loan/loanApproval"
-    echo "  BE07-0301-01|vault/useCase/credit/creditCheck"
+    echo "  BE07-0201-12|functions/vault/useCase/loan/loanRequest"
+    echo "  BE07-0202-01|functions/vault/useCase/loan/loanApproval"
+    echo "  BE07-0301-01|functions/vault/useCase/credit/creditCheck"
     echo ""
     echo "ENVIRONMENT VARIABLES:"
     echo "  ALLOWED_TOOLS_FILE: Path to allowed tools file (default: /mnt/c/Users/admin/Documents/GitHub/kiaiGithub/allowedTools.txt)"
@@ -244,6 +244,8 @@ usage() {
     echo "  - Use Case functions and methods"
     echo "  - Service layer functions and methods"
     echo "  - Repository layer functions and methods"
+    echo "  - Controller with authentication and routing"
+    echo "  - HTTP test files for endpoint testing"
     echo "  - All components must pass 'yarn watch' and 'yarn build' without errors"
     echo ""
     echo "RELATED PR BRANCHING:"
@@ -501,6 +503,10 @@ Track all operations for potential rollback. For each operation that creates or 
    - Parameters
    - Service functions and methods
    - Repository functions and methods
+   - Authentication requirements
+   - Request body schema
+   - Response format
+   - Required HTTP headers
    - Any other implementation details
 
 4. Create a markdown file with comprehensive instructions for Claude Code Action:
@@ -511,6 +517,13 @@ Track all operations for potential rollback. For each operation that creates or 
      * The complete use case with all methods
      * All service functions and methods mentioned in the spreadsheet
      * All repository functions and methods mentioned in the spreadsheet
+     * Controller implementation requirements:
+       - Follow the guidelines in /functions/.cursor/rules/controller-layer.md
+     * HTTP test file requirements:
+       - File path: functions/rest/\${restPath}/\${endpointName}.http
+       - Endpoint documentation
+       - Example requests with headers
+       - Sample responses
      * Parameter validations and types
      * Error handling
      * Check and implement any missing domain objects mentioned in the spreadsheet
@@ -545,6 +558,8 @@ Track all operations for potential rollback. For each operation that creates or 
        - Use Case: \${useCaseMethods}
        - Service: \${serviceMethods}
        - Repository: \${repositoryMethods}
+       - Controller: \${controllerName}
+       - HTTP Test: \${endpointName}.http
      * Base branch: $BASE_BRANCH
    - Track PR creation for rollback (save PR number and URL)
 
@@ -563,8 +578,10 @@ Track all operations for potential rollback. For each operation that creates or 
    1. Use Case in src/useCase/\${pathOfUseCase}.ts
    2. Service functions in src/service/\${pathOfService}.ts
    3. Repository functions in src/repository/\${pathOfRepository}.ts
-   4. Any necessary interfaces, types, or domain models
-   5. Unit tests for all components
+   4. Controller in src/controller/\${pathOfController}.ts
+   5. HTTP test file in functions/rest/\${pathOfEndpoint}.http
+   6. Any necessary interfaces, types, or domain models
+   7. Unit tests for all components
 
    CRITICAL: After implementation, you MUST:
    1. Run 'yarn watch' to ensure no TypeScript errors
