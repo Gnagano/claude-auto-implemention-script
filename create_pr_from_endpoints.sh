@@ -246,7 +246,7 @@ usage() {
     echo "  - Repository layer functions and methods"
     echo "  - Controller with authentication and routing"
     echo "  - HTTP test files for endpoint testing"
-    echo "  - All components must pass 'yarn watch' and 'yarn build' without errors"
+    echo "  - All components must pass 'yarn tsc --noEmit' without errors"
     echo ""
     echo "RELATED PR BRANCHING:"
     echo "  The script will automatically detect related PRs in the same directory"
@@ -519,15 +519,18 @@ Track all operations for potential rollback. For each operation that creates or 
      * All repository functions and methods mentioned in the spreadsheet
      * Controller implementation requirements:
        - Follow the guidelines in /functions/.cursor/rules/controller-layer.md
+       - File path: src/controller/\${controllerPath}/\${controllerName}.ts
      * HTTP test file requirements:
-       - File path: functions/rest/\${restPath}/\${endpointName}.http
+       - File path: functions/rest/\${restPath}/\${apiMethod}_\${apiPathBy}_\${caseType}.http
+       - Naming format: APIMETHOD_apiPathBy_case.http (e.g., GET_debitCardsByUserId_query.http)
+       - IMPORTANT: apiMethod must be uppercase (GET, POST, PUT, DELETE, etc.)
        - Endpoint documentation
        - Example requests with headers
        - Sample responses
      * Parameter validations and types
      * Error handling
      * Check and implement any missing domain objects mentioned in the spreadsheet
-     * Testing requirements: Must pass 'yarn lint', 'yarn watch' and 'yarn build' without errors
+     * Testing requirements: Must pass 'yarn lint', 'yarn tsc --noEmit' without errors
    - Track file creation for rollback: rm $md_destination/\${NameOfUseCase}UseCase.md
 
 5. Create a new Git branch:
@@ -559,7 +562,7 @@ Track all operations for potential rollback. For each operation that creates or 
        - Service: \${serviceMethods}
        - Repository: \${repositoryMethods}
        - Controller: \${controllerName}
-       - HTTP Test: \${endpointName}.http
+       - HTTP Test: \${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
      * Base branch: $BASE_BRANCH
    - Track PR creation for rollback (save PR number and URL)
 
@@ -573,19 +576,20 @@ Track all operations for potential rollback. For each operation that creates or 
 
    IMPORTANT: You MUST read ALL files in /functions/.cursor/rules/*.mdc before implementation.
    Strictly follow all guidelines including domain object implementation.
+   For controller implementation, follow /functions/.cursor/rules/controller-layer.md.
 
    Please implement:
    1. Use Case in src/useCase/\${pathOfUseCase}.ts
    2. Service functions in src/service/\${pathOfService}.ts
    3. Repository functions in src/repository/\${pathOfRepository}.ts
    4. Controller in src/controller/\${pathOfController}.ts
-   5. HTTP test file in functions/rest/\${pathOfEndpoint}.http
+   5. HTTP test file in functions/rest/\${pathOfEndpoint}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
    6. Any necessary interfaces, types, or domain models
    7. Unit tests for all components
 
    CRITICAL: After implementation, you MUST:
-   1. Run 'yarn watch' to ensure no TypeScript errors
-   2. Run 'yarn build' to ensure the build succeeds
+   1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
+   2. Run 'yarn tsc --noEmit' or similar TypeScript check command to ensure no TypeScript errors
    3. Fix any errors before marking the task as complete
 
    The implementation should handle all edge cases, validations, and error scenarios.
