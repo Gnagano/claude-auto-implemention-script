@@ -19,6 +19,7 @@ print_warning() {
     echo -e "\033[33m[WARNING]\033[0m $1"
 }
 
+
 # Default values
 ALLOWED_TOOLS_FILE="${ALLOWED_TOOLS_FILE:-/mnt/c/Users/admin/Documents/GitHub/kiaiGithub/allowedTools.txt}"
 AUTO_ROLLBACK=true
@@ -26,39 +27,9 @@ CONFIRM_EACH_ENDPOINT=false
 DRY_RUN=false
 ROLLBACK_ALL_ON_ANY_FAILURE=false
 ROLLBACK_ALL_AT_END=false
-
-# Function to show progress dots every 10 seconds
-show_progress() {
-    local pid=$1
-    local message=$2
-    local dots=""
-    local elapsed=0
-    
-    # Print initial message to stderr (unbuffered)
-    echo -n "$message" >&2
-    
-    while kill -0 $pid 2>/dev/null; do
-        # Print dot to stderr to avoid buffering
-        echo -n "." >&2
-        dots="${dots}."
-        elapsed=$((elapsed + 10))
-        
-        # Show elapsed time every 30 seconds
-        if [ $((elapsed % 30)) -eq 0 ]; then
-            echo -n " [${elapsed}s]" >&2
-        fi
-        
-        # Clear line and restart dots after 12 dots (2 minutes)
-        if [ ${#dots} -eq 12 ]; then
-            echo -ne "\r\033[K$message" >&2
-            dots=""
-        fi
-        
-        sleep 10
-    done
-    
-    echo " Done! [Total: ${elapsed}s]" >&2
-}
+USE_CACHE=true
+FORCE_REFRESH_CACHE=false
+CACHE_DIR="${CACHE_DIR:-/tmp/claude_pr_cache}"
 
 # Rollback tracking arrays
 declare -a ROLLBACK_OPERATIONS=()
@@ -210,6 +181,8 @@ usage() {
     echo "  --dry-run             Show what would be done without executing"
     echo "  --rollback-all-on-failure  Rollback ALL successful endpoints if ANY endpoint fails"
     echo "  --rollback-all-at-end     Ask to rollback all endpoints at the end"
+    echo "  --no-cache            Disable spreadsheet caching"
+    echo "  --refresh-cache       Force refresh cached spreadsheet data"
     echo "  -h, --help            Show this help message"
     echo ""
     echo "CONFIGURATION FILE FORMAT:"
@@ -301,6 +274,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rollback-all-at-end)
             ROLLBACK_ALL_AT_END=true
+            shift
+            ;;
+        --no-cache)
+            USE_CACHE=false
+            shift
+            ;;
+        --refresh-cache)
+            FORCE_REFRESH_CACHE=true
             shift
             ;;
         -h|--help)
@@ -452,8 +433,162 @@ if [ -n "$REPO_PATH" ]; then
 fi
 print_info "========================================="
 
+# Function to generate common prompt parts
+generate_common_prompt() {
+    local endpoint_id="$1"
+    local base_branch="$2"
+    local md_destination="$3"
+    
+    cat << 'EOF'
+IMPORTANT: You are now in the repository directory: $(pwd)
+PROJECT STRUCTURE: This is a Firebase Functions project. 
+
+FIRST STEP: Change to the functions directory for all package manager commands:
+cd functions
+
+After changing to functions directory, you can run yarn/npm commands directly without 'cd functions &&' prefix.
+NOTE: When in functions directory, file paths should be relative to functions (e.g., src/controller/... not functions/src/controller/...)
+Track all operations for potential rollback. For each operation that creates or modifies something, log the rollback command.
+EOF
+}
+
+# Function to generate implementation steps
+generate_implementation_steps() {
+    local endpoint_id="$1"
+    local base_branch="$2"
+    local existing_markdown="$3"
+    
+    cat << EOF
+
+5. Create a new Git branch:
+   - First, checkout the base branch: $base_branch
+   - Create new branch from it: 'feature/implement-$endpoint_id'
+   - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
+
+6. IMPLEMENT THE CODE LOCALLY$([ "$existing_markdown" = "true" ] && echo " based on existing markdown instructions" || echo " (instead of creating PR first)"):
+
+   $([ "$existing_markdown" = "false" ] && echo "IMPORTANT: You MUST read ALL files in /functions/**/.cursor/rules/*.mdc before implementation.
+   Strictly follow all guidelines for each layer (controller-layer.mdc, rest-http.mdc, etc.).
+
+   ")Implementation approach (implement first, test later):
+   
+   A. First, implement the domain objects and types:
+      - Create necessary interfaces and types
+   
+   B. Implement core components$([ "$existing_markdown" = "true" ] && echo " as specified in the existing markdown" || echo ""):
+      1. Use Case in src/useCase/\${pathOfUseCase}.ts
+      2. Service functions in src/service/\${pathOfService}.ts
+      3. Repository functions in src/repository/\${pathOfRepository}.ts
+      4. Controller in src/controller/\${pathOfController}.ts
+      5. Update src/api.ts to map endpoint base path to the new controller (prefer MultiEdit tool to avoid backup files)
+      6. HTTP test file in rest/\${pathOfEndpoint}/\${HTTP_METHOD}_\${endpoint_description}.http
+   
+   C. After ALL implementation is complete, validate and test:
+      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
+      2. Create basic unit tests for critical functionality
+      3. Test HTTP endpoints using the created .http files
+      4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
+         - If there are errors, fix them and re-run until no errors remain
+         - Only run this ONCE after all files are implemented
+   
+   D. Ensure the implementation handles all edge cases, validations, and error scenarios
+
+7. After successful local implementation and testing:
+   - Clean up any backup files: rm -f src/api.ts.backup
+   - Stage all implemented files: git add .
+   - Commit with descriptive message:
+     feat: Implement \${NameOfUseCase} endpoint $endpoint_id
+     
+     - Added \${useCaseMethods} use case
+     - Added \${serviceMethods} service functions  
+     - Added \${repositoryMethods} repository functions
+     - Added \${controllerName} controller
+     - Updated src/api.ts with endpoint mapping
+     - Added HTTP test file
+     - TypeScript checks passed, basic tests implemented
+   - Track commit for rollback: git reset --hard HEAD~1
+
+8. Push the implemented code to remote origin:
+   - Push branch: git push origin feature/implement-$endpoint_id
+   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
+
+9. Create a pull request targeting the develop branch (or current base branch):
+   - Target branch: develop (or the base branch that was checked out)
+   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
+   - Body should include:
+     * Brief description of the use case
+     * REST API Method: \${restAPIMethod}
+     * Endpoint Path: \${endpointPath}
+     * ✅ IMPLEMENTATION COMPLETED locally
+     * Components implemented:
+       - ✅ Use Case: \${useCaseMethods}
+       - ✅ Service: \${serviceMethods}
+       - ✅ Repository: \${repositoryMethods}
+       - ✅ Controller: \${controllerName}
+       - ✅ API Mapping: Updated src/api.ts
+       - ✅ HTTP Test: \${HTTP_METHOD}_\${endpoint_description}.http
+       - ✅ Basic unit tests for critical functionality
+     * Testing status:
+       - ✅ TypeScript compilation: PASSED
+       - ✅ Basic tests: PASSED
+       - ✅ HTTP endpoint tests: VERIFIED
+     * Base branch: $base_branch
+     * Ready for code review and merge
+   - Track PR creation for rollback (save PR number and URL)
+
+10. IMPORTANT: Save the PR information for future reference:
+    - Endpoint ID: $endpoint_id
+    - PR Branch: feature/implement-$endpoint_id
+    - PR URL: [save the actual PR URL]
+    - Destination: $md_destination
+
+ROLLBACK LOGGING: At the end, print a summary of all rollback commands that would undo the operations:
+- File operations (rm commands)
+- Directory operations (rmdir commands)  
+- Git operations (branch deletion, reset commands, remote deletion)
+- PR operations (PR number for manual closure)
+
+Please log progress at each step and report any errors encountered.
+$([ "$existing_markdown" = "true" ] && echo "Replace all \${...} placeholders with actual values from the existing markdown file." || echo "Replace all \${...} placeholders with actual values from the spreadsheet.")
+EOF
+}
+
+# Create cache directory if needed
+if [ "$USE_CACHE" = true ] && [ ! -d "$CACHE_DIR" ]; then
+    print_info "Creating cache directory: $CACHE_DIR"
+    mkdir -p "$CACHE_DIR"
+fi
+
+# Function to get cache file path for an endpoint
+get_cache_file() {
+    local endpoint_id="$1"
+    local spreadsheet_hash=$(echo -n "${SPREADSHEET_NAME}_${WORKSHEET_NAME}" | md5sum | cut -d' ' -f1)
+    echo "${CACHE_DIR}/${spreadsheet_hash}_${endpoint_id}.cache"
+}
+
+# Function to check if cache is valid (24 hours)
+is_cache_valid() {
+    local cache_file="$1"
+    if [ ! -f "$cache_file" ]; then
+        return 1
+    fi
+    
+    local cache_age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)))
+    local max_age=$((24 * 60 * 60))  # 24 hours in seconds
+    
+    if [ "$cache_age" -lt "$max_age" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Count total endpoints first (for progress display)
+TOTAL_ENDPOINTS=$(grep -E -v "^#|^CONFIG:|^$" "$ENDPOINTS_FILE" 2>/dev/null | wc -l)
+
 # Process endpoints
 print_info "Processing endpoints..."
+print_info "Total endpoints to process: $TOTAL_ENDPOINTS"
 ENDPOINT_COUNT=0
 PROCESSED_COUNT=0
 FAILED_COUNT=0
@@ -488,36 +623,56 @@ while IFS= read -r line || [ -n "$line" ]; do
     
     ENDPOINT_COUNT=$((ENDPOINT_COUNT + 1))
     print_info "========================================="
-    print_info "Processing endpoint $ENDPOINT_COUNT: $endpoint_id"
+    print_info "Processing endpoint $ENDPOINT_COUNT/$TOTAL_ENDPOINTS: $endpoint_id"
     print_info "  Destination folder: $md_destination"
     
     # Find related PR if exists
     BASE_BRANCH=$(find_related_pr "$md_destination")
     if [ -z "$BASE_BRANCH" ]; then
-        BASE_BRANCH="main"
+        BASE_BRANCH="develop"
         print_info "No related PR found. Will branch from: $BASE_BRANCH"
     else
         print_info "Found related PR. Will branch from: $BASE_BRANCH"
     fi
     
+    # Check cache for this endpoint
+    CACHE_FILE=$(get_cache_file "$endpoint_id")
+    USE_CACHED_DATA=false
+    
+    if [ "$USE_CACHE" = true ] && [ "$FORCE_REFRESH_CACHE" = false ] && is_cache_valid "$CACHE_FILE"; then
+        print_info "Found valid cache for endpoint $endpoint_id"
+        USE_CACHED_DATA=true
+    else
+        print_info "No valid cache found for endpoint $endpoint_id, will read from spreadsheet"
+    fi
+    
     # Create the prompt for this endpoint
-    PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
+    if [ "$USE_CACHED_DATA" = true ]; then
+        # Use cached data prompt
+        PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
 
-IMPORTANT: You are now in the repository directory: $(pwd)
-PROJECT STRUCTURE: This is a Firebase Functions project. 
+$(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
 
-FIRST STEP: Change to the functions directory for all package manager commands:
-cd functions
+1. Read the cached spreadsheet data from file: $CACHE_FILE
 
-After changing to functions directory, you can run yarn/npm commands directly without 'cd functions &&' prefix.
-NOTE: When in functions directory, file paths should be relative to functions (e.g., src/controller/... not functions/src/controller/...)
-Track all operations for potential rollback. For each operation that creates or modifies something, log the rollback command.
+2. The cache contains all details from the '$WORKSHEET_NAME' worksheet for endpoint '$endpoint_id'
+
+3. Use the cached data which includes:"
+    else
+        # Original prompt with spreadsheet reading
+        PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
+
+$(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
 
 1. Read the Google Sheets spreadsheet named '$SPREADSHEET_NAME'
 
 2. Search for endpoint ID '$endpoint_id' in the '$WORKSHEET_NAME' worksheet
 
-3. Read ALL details from the rows found. IMPORTANT: Extract ALL of the following:
+3. Read ALL details from the rows found. IMPORTANT: Extract ALL of the following:"
+    fi
+    
+    # Continue with common details
+    PROMPT="${PROMPT}
    - REST API Method (GET, POST, PUT, DELETE, etc.)
    - Endpoint Path (e.g., /api/v1/users)
    - Use Case Name and Methods
@@ -529,6 +684,19 @@ Track all operations for potential rollback. For each operation that creates or 
    - Response format
    - Required HTTP headers
    - Any other implementation details
+"
+    
+    # Add cache saving instruction if reading from spreadsheet
+    if [ "$USE_CACHED_DATA" = false ]; then
+        PROMPT="${PROMPT}
+
+3a. IMPORTANT: Save the extracted data to cache file: $CACHE_FILE
+    Create a JSON or structured text file with all the extracted information for future use.
+"
+    fi
+    
+    # Continue with markdown creation
+    PROMPT="${PROMPT}
 
 4. Create a markdown file with comprehensive instructions for Claude Code Action:
    - MANDATORY: First, read ALL .mdc files in functions/**/.cursor/rules/*.mdc
@@ -538,109 +706,14 @@ Track all operations for potential rollback. For each operation that creates or 
      * The complete use case with all methods
      * All service functions and methods mentioned in the spreadsheet
      * All repository functions and methods mentioned in the spreadsheet
-     * Controller implementation requirements:
-       - File path: src/controller/\${controllerPath}/\${controllerName}.ts (relative to functions directory)
-     * HTTP test file requirements:
-       - File path: rest/\${restPath}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (relative to functions directory)
-       - Naming format: APIMETHOD_apiPathBy_case.http (e.g., GET_debitCardsByUserId_query.http)
-       - IMPORTANT: apiMethod must be uppercase (GET, POST, PUT, DELETE, etc.)
-       - Endpoint documentation
-       - Example requests with headers
-       - Sample responses
+     * Controller implementation
+     * HTTP test file
      * Parameter validations and types
      * Error handling
      * Testing requirements: Must pass 'yarn tsc --noEmit' (fix all TypeScript errors) (run from functions directory)
    - Track file creation for rollback: rm $md_destination/\${NameOfUseCase}UseCase.md
 
-5. Create a new Git branch:
-   - First, checkout the base branch: $BASE_BRANCH
-   - Create new branch from it: 'feature/implement-$endpoint_id'
-   - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
-
-6. IMPLEMENT THE CODE LOCALLY (instead of creating PR first):
-
-   IMPORTANT: You MUST read ALL files in /functions/**/.cursor/rules/*.mdc before implementation.
-   Strictly follow all guidelines including domain object implementation.
-   For controller implementation, follow /functions/.cursor/rules/controller-layer.md.
-
-   Implementation approach (implement first, test later):
-   
-   A. First, implement the domain objects and types:
-      - Create necessary interfaces and types
-   
-   B. Implement core components:
-      1. Use Case in src/useCase/\${pathOfUseCase}.ts
-      2. Service functions in src/service/\${pathOfService}.ts
-      3. Repository functions in src/repository/\${pathOfRepository}.ts
-      4. Controller in src/controller/\${pathOfController}.ts
-      5. Update src/api.ts to map endpoint base path to the new controller
-      6. HTTP test file in rest/\${pathOfEndpoint}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
-   
-   C. After ALL implementation is complete, validate and test:
-      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
-      2. Create basic unit tests for critical functionality
-      3. Test HTTP endpoints using the created .http files
-      4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
-         - If there are errors, fix them and re-run until no errors remain
-         - Only run this ONCE after all files are implemented
-   
-   D. Ensure the implementation handles all edge cases, validations, and error scenarios
-
-7. After successful local implementation and testing:
-   - Stage all implemented files: git add .
-   - Commit with descriptive message:
-     feat: Implement \${NameOfUseCase} endpoint $endpoint_id
-     
-     - Added \${useCaseMethods} use case
-     - Added \${serviceMethods} service functions  
-     - Added \${repositoryMethods} repository functions
-     - Added \${controllerName} controller
-     - Updated src/api.ts with endpoint mapping
-     - Added HTTP test file
-     - TypeScript checks passed, basic tests implemented
-   - Track commit for rollback: git reset --hard HEAD~1
-
-8. Push the implemented code to remote origin:
-   - Push branch: git push origin feature/implement-$endpoint_id
-   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
-
-9. Create a pull request with:
-   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
-   - Body should include:
-     * Brief description of the use case
-     * REST API Method: \${restAPIMethod}
-     * Endpoint Path: \${endpointPath}
-     * ✅ IMPLEMENTATION COMPLETED locally
-     * Components implemented:
-       - ✅ Use Case: \${useCaseMethods}
-       - ✅ Service: \${serviceMethods}
-       - ✅ Repository: \${repositoryMethods}
-       - ✅ Controller: \${controllerName}
-       - ✅ API Mapping: Updated src/api.ts
-       - ✅ HTTP Test: \${apiMethod}_\${apiPathBy}_\${caseType}.http
-       - ✅ Basic unit tests for critical functionality
-     * Testing status:
-       - ✅ TypeScript compilation: PASSED
-       - ✅ Basic tests: PASSED
-       - ✅ HTTP endpoint tests: VERIFIED
-     * Base branch: $BASE_BRANCH
-     * Ready for code review and merge
-   - Track PR creation for rollback (save PR number and URL)
-
-10. IMPORTANT: Save the PR information for future reference:
-    - Endpoint ID: $endpoint_id
-    - PR Branch: feature/implement-$endpoint_id
-    - PR URL: [save the actual PR URL]
-    - Destination: $md_destination
-
-ROLLBACK LOGGING: At the end, print a summary of all rollback commands that would undo the operations:
-- File operations (rm commands)
-- Directory operations (rmdir commands)  
-- Git operations (branch deletion, reset commands, remote deletion)
-- PR operations (PR number for manual closure)
-
-Please log progress at each step and report any errors encountered.
-Replace all \${...} placeholders with actual values from the spreadsheet."
+$(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "false")"
 
     # Check if confirmation is required for this endpoint
     if [ "$CONFIRM_EACH_ENDPOINT" = true ]; then
@@ -673,15 +746,7 @@ Replace all \${...} placeholders with actual values from the spreadsheet."
         # Modify prompt to use existing markdown instead of creating new one
         PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
 
-IMPORTANT: You are now in the repository directory: $(pwd)
-PROJECT STRUCTURE: This is a Firebase Functions project. 
-
-FIRST STEP: Change to the functions directory for all package manager commands:
-cd functions
-
-After changing to functions directory, you can run yarn/npm commands directly without 'cd functions &&' prefix.
-NOTE: When in functions directory, file paths should be relative to functions (e.g., src/controller/... not functions/src/controller/...)
-Track all operations for potential rollback. For each operation that creates or modifies something, log the rollback command.
+$(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
 
 EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destination/
 
@@ -694,86 +759,7 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
    - Create new branch from it: 'feature/implement-$endpoint_id'
    - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
 
-5. IMPLEMENT THE CODE LOCALLY based on existing markdown instructions:
-
-   Implementation approach (implement first, test later):
-   
-   A. First, implement the domain objects and types:
-      - Create necessary interfaces and types
-   
-   B. Implement core components as specified in the existing markdown:
-      1. Use Case in src/useCase/\${pathOfUseCase}.ts
-      2. Service functions in src/service/\${pathOfService}.ts
-      3. Repository functions in src/repository/\${pathOfRepository}.ts
-      4. Controller in src/controller/\${pathOfController}.ts
-      5. Update src/api.ts to map endpoint base path to the new controller
-      6. HTTP test file in rest/\${pathOfEndpoint}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
-   
-   C. After ALL implementation is complete, validate and test:
-      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
-      2. Create basic unit tests for critical functionality
-      3. Test HTTP endpoints using the created .http files
-      4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
-         - If there are errors, fix them and re-run until no errors remain
-         - Only run this ONCE after all files are implemented
-   
-   D. Ensure the implementation handles all edge cases, validations, and error scenarios
-
-6. After successful local implementation and testing:
-   - Stage all implemented files: git add .
-   - Commit with descriptive message:
-     feat: Implement \${NameOfUseCase} endpoint $endpoint_id
-     
-     - Added \${useCaseMethods} use case
-     - Added \${serviceMethods} service functions  
-     - Added \${repositoryMethods} repository functions
-     - Added \${controllerName} controller
-     - Updated src/api.ts with endpoint mapping
-     - Added HTTP test file
-     - TypeScript checks passed, basic tests implemented
-   - Track commit for rollback: git reset --hard HEAD~1
-
-7. Push the implemented code to remote origin:
-   - Push branch: git push origin feature/implement-$endpoint_id
-   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
-
-8. Create a pull request with:
-   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
-   - Body should include:
-     * Brief description of the use case
-     * REST API Method: \${restAPIMethod}
-     * Endpoint Path: \${endpointPath}
-     * ✅ IMPLEMENTATION COMPLETED locally
-     * Components implemented:
-       - ✅ Use Case: \${useCaseMethods}
-       - ✅ Service: \${serviceMethods}
-       - ✅ Repository: \${repositoryMethods}
-       - ✅ Controller: \${controllerName}
-       - ✅ API Mapping: Updated src/api.ts
-       - ✅ HTTP Test: \${apiMethod}_\${apiPathBy}_\${caseType}.http
-       - ✅ Basic unit tests for critical functionality
-     * Testing status:
-       - ✅ TypeScript compilation: PASSED
-       - ✅ Basic tests: PASSED
-       - ✅ HTTP endpoint tests: VERIFIED
-     * Base branch: $BASE_BRANCH
-     * Ready for code review and merge
-   - Track PR creation for rollback (save PR number and URL)
-
-9. IMPORTANT: Save the PR information for future reference:
-    - Endpoint ID: $endpoint_id
-    - PR Branch: feature/implement-$endpoint_id
-    - PR URL: [save the actual PR URL]
-    - Destination: $md_destination
-
-ROLLBACK LOGGING: At the end, print a summary of all rollback commands that would undo the operations:
-- File operations (rm commands)
-- Directory operations (rmdir commands)  
-- Git operations (branch deletion, reset commands, remote deletion)
-- PR operations (PR number for manual closure)
-
-Please log progress at each step and report any errors encountered.
-Replace all \${...} placeholders with actual values from the existing markdown file."
+$(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
     fi
     
     # Clear rollback tracking for this endpoint
@@ -942,6 +928,8 @@ print_info "  Confirm Each: $CONFIRM_EACH_ENDPOINT"
 print_info "  Dry Run: $DRY_RUN"
 print_info "  Rollback All On Failure: $ROLLBACK_ALL_ON_ANY_FAILURE"
 print_info "  Rollback All At End: $ROLLBACK_ALL_AT_END"
+print_info "  Use Cache: $USE_CACHE"
+print_info "  Cache Directory: $CACHE_DIR"
 
 if [ "$DRY_RUN" = true ]; then
     print_info ""
