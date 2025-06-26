@@ -21,7 +21,6 @@ print_warning() {
 
 
 # Default values
-ALLOWED_TOOLS_FILE="${ALLOWED_TOOLS_FILE:-/mnt/c/Users/admin/Documents/GitHub/kiaiGithub/allowedTools.txt}"
 AUTO_ROLLBACK=true
 CONFIRM_EACH_ENDPOINT=false
 DRY_RUN=false
@@ -30,6 +29,39 @@ ROLLBACK_ALL_AT_END=false
 USE_CACHE=true
 FORCE_REFRESH_CACHE=false
 CACHE_DIR="${CACHE_DIR:-/tmp/claude_pr_cache}"
+
+# Function to show progress dots every 10 seconds
+show_progress() {
+    local pid=$1
+    local message=$2
+    local dots=""
+    local elapsed=0
+    
+    # Print initial message to stderr (unbuffered)
+    echo -n "$message" >&2
+    
+    while kill -0 $pid 2>/dev/null; do
+        # Print dot to stderr to avoid buffering
+        echo -n "." >&2
+        dots="${dots}."
+        elapsed=$((elapsed + 10))
+        
+        # Show elapsed time every 30 seconds
+        if [ $((elapsed % 30)) -eq 0 ]; then
+            echo -n " [${elapsed}s]" >&2
+        fi
+        
+        # Clear line and restart dots after 12 dots (2 minutes)
+        if [ ${#dots} -eq 12 ]; then
+            echo -ne "\r\033[K$message" >&2
+            dots=""
+        fi
+        
+        sleep 10
+    done
+    
+    echo " Done! [Total: ${elapsed}s]" >&2
+}
 
 # Rollback tracking arrays
 declare -a ROLLBACK_OPERATIONS=()
@@ -203,7 +235,7 @@ usage() {
     echo "  BE07-0301-01|functions/vault/useCase/credit/creditCheck"
     echo ""
     echo "ENVIRONMENT VARIABLES:"
-    echo "  ALLOWED_TOOLS_FILE: Path to allowed tools file (default: /mnt/c/Users/admin/Documents/GitHub/kiaiGithub/allowedTools.txt)"
+    echo "  Note: Claude will use .mcp.json and settings.local.json from each project"
     echo ""
     echo "MCP CONFIGURATION:"
     echo "  The script expects a .mcp.json file in the repository root directory"
@@ -225,7 +257,7 @@ usage() {
     echo ""
     echo "LOCAL IMPLEMENTATION WORKFLOW:"
     echo "  - First action: cd functions (change to functions directory)"
-    echo "  - Read all coding guidelines from /functions/**/.cursor/rules/*.mdc"
+    echo "  - Read all coding guidelines from /functions/.cursor/rules/general/*.mdc"
     echo "  - Implementation approach:"
     echo "    1. Implement all components (use case, service, repository, controller)"
     echo "    2. Create HTTP test files"
@@ -233,7 +265,7 @@ usage() {
     echo "    4. Create basic unit tests"
     echo "    5. Create HTTP endpoints with .http files"
     echo "  - Create PR only after implementation passes all checks"
-    echo "  - Timeout: 1 hour maximum for implementation"
+    echo "  - Timeout: 2 hours maximum for implementation"
     echo ""
     echo "RELATED PR BRANCHING:"
     echo "  The script will automatically detect related PRs in the same directory"
@@ -250,6 +282,220 @@ usage() {
     echo "  - File operations: file creation, directory creation"
     echo "  - GitHub operations: PR creation and comments"
     exit ${1:-0}
+}
+
+# Function to detect implementation pattern from endpoint path
+detect_pattern_from_path() {
+    local path="$1"
+    
+    if [[ "$path" =~ request ]]; then
+        echo "request"
+    elif [[ "$path" =~ (transaction|transfer|payment|withdrawal|deposit) ]]; then
+        echo "transaction"
+    elif [[ "$path" =~ (report|history|statement|analytics) ]]; then
+        echo "query"
+    elif [[ "$path" =~ (management|admin) ]]; then
+        echo "management"
+    else
+        # Default to management (CRUD) pattern
+        echo "management"
+    fi
+}
+
+# Function to generate pattern-specific verification
+generate_pattern_verification() {
+    local pattern_type="$1"
+    
+    case "$pattern_type" in
+        "request")
+            cat << 'EOF'
+REQUEST PATTERN VERIFICATION:
+[ ] Create request endpoint (POST)
+[ ] List requests endpoint (GET)
+[ ] Get request by ID (GET /:id)
+[ ] State change endpoints:
+    [ ] Approve (POST /:id/approve)
+    [ ] Reject (POST /:id/reject)
+    [ ] Cancel (POST /:id/cancel)
+    [ ] Withdraw (POST /:id/withdraw)
+[ ] Email notifications for state changes
+[ ] Audit trail for all actions
+[ ] Proper state validation in domain
+EOF
+            ;;
+        "transaction")
+            cat << 'EOF'
+TRANSACTION PATTERN VERIFICATION:
+[ ] Create transaction (POST)
+[ ] Get transaction (GET /:id)
+[ ] List transactions with filters (GET)
+[ ] Transaction status check
+[ ] Reversal endpoint (if applicable)
+[ ] Atomic database operations
+[ ] Balance updates handled correctly
+[ ] Transaction history maintained
+EOF
+            ;;
+        "management")
+            cat << 'EOF'
+MANAGEMENT PATTERN VERIFICATION:
+[ ] Create resource (POST)
+[ ] List resources (GET)
+[ ] Get resource by ID (GET /:id)
+[ ] Update resource (PUT /:id)
+[ ] Partial update (PATCH /:id)
+[ ] Delete resource (DELETE /:id)
+[ ] Bulk operations (if applicable)
+[ ] Validation for all operations
+[ ] Proper authorization checks
+EOF
+            ;;
+        "query")
+            cat << 'EOF'
+QUERY PATTERN VERIFICATION:
+[ ] List with pagination (GET)
+[ ] Advanced filtering support
+[ ] Sorting capabilities
+[ ] Aggregation endpoints (if needed)
+[ ] Export functionality (CSV/Excel)
+[ ] Performance optimization
+[ ] Proper indexing considered
+EOF
+            ;;
+    esac
+}
+
+# Function to generate pattern detection and analysis prompt
+generate_pattern_analysis() {
+    local endpoint_id="$1"
+    local endpoint_path="$2"
+    local domain_path="$3"
+    local pattern_type="$4"
+    
+    cat << EOF
+PATTERN DETECTION AND ANALYSIS:
+
+Detected Pattern Type: ${pattern_type^^}
+
+1. Pattern-Specific Requirements:
+EOF
+    
+    case "$pattern_type" in
+        "request")
+            cat << 'EOF'
+   - This is a REQUEST pattern (workflow-based)
+   - Look for state machine diagrams (.puml files)
+   - Identify all state transitions
+   - Find approval/rejection workflows
+   - Check email notification requirements
+   - Look for BaseRequest or AbstractRequest classes
+EOF
+            ;;
+        "transaction")
+            cat << 'EOF'
+   - This is a TRANSACTION pattern
+   - Look for transaction processing logic
+   - Check balance calculation methods
+   - Find reversal mechanisms
+   - Identify fee structures
+   - Look for BaseTransaction classes
+EOF
+            ;;
+        "management")
+            cat << 'EOF'
+   - This is a MANAGEMENT pattern (CRUD)
+   - Standard CRUD operations required
+   - Check for bulk operations needs
+   - Identify validation rules
+   - Look for similar management endpoints
+EOF
+            ;;
+        "query")
+            cat << 'EOF'
+   - This is a QUERY/REPORT pattern
+   - Focus on filtering and pagination
+   - Check for aggregation needs
+   - Look for export requirements
+   - Identify performance considerations
+EOF
+            ;;
+    esac
+    
+    cat << 'EOF'
+
+2. Find Similar Implementations:
+   - Search for other endpoints with the same pattern
+   - Look in parallel domains for reference
+   - Study the most complete implementation
+
+3. Base Class Detection:
+   - Search for abstract classes or interfaces
+   - Check inheritance patterns in the domain
+   - Identify required method implementations
+
+4. Related Endpoints:
+   - List all endpoints that work together
+   - Identify the complete feature set
+   - Check for missing operations
+EOF
+}
+
+# Function to perform post-implementation review
+post_implementation_review() {
+    local endpoint_id="$1"
+    local pattern_type="$2"
+    
+    print_info "Performing post-implementation review for pattern: $pattern_type"
+    
+    # Pattern-specific checks
+    case "$pattern_type" in
+        "request")
+            # Check for state transition endpoints
+            if ! find src/controller -name "*${endpoint_id}*" -type f -exec grep -l "approve\|reject\|cancel" {} \; | grep -q .; then
+                print_warning "No state transition endpoints found (approve/reject/cancel)"
+            fi
+            # Check for email service
+            if ! find src/service -name "*Email*" -type f | grep -q .; then
+                print_warning "No email service implementation found for state changes"
+            fi
+            ;;
+        "transaction")
+            # Check for transaction handling
+            if ! grep -r "prisma.\$transaction" src/ | grep -q .; then
+                print_warning "No Prisma transactions found - atomicity may be compromised"
+            fi
+            # Check for calculation helpers
+            if ! grep -r "addByDecimal\|minusByDecimal" src/ | grep -q .; then
+                print_warning "No calculation helpers used - decimal arithmetic may be incorrect"
+            fi
+            ;;
+        "management")
+            # Check for CRUD completeness
+            local crud_count=$(find src/controller -name "*${endpoint_id}*" -type f -exec grep -c "router\.\(get\|post\|put\|delete\)" {} \; | paste -sd+ | bc 2>/dev/null || echo 0)
+            if [ "$crud_count" -lt 4 ]; then
+                print_warning "Only $crud_count CRUD endpoints found (expected at least 4)"
+            fi
+            ;;
+        "query")
+            # Check for pagination/filtering
+            if ! grep -r "limit\|offset\|orderBy" src/ | grep -q .; then
+                print_warning "No pagination or filtering logic found"
+            fi
+            ;;
+    esac
+    
+    # Common checks
+    if ! grep -r "extends" src/domain | grep -q .; then
+        print_warning "No inheritance detected - domain object may not extend base class"
+    fi
+    
+    if ! find rest/ -name "*${endpoint_id}*" -o -name "*http" | grep -q .; then
+        print_warning "No HTTP test files found for endpoint"
+    fi
+    
+    # Count endpoints implemented
+    local endpoint_count=$(find src/controller -name "*" -type f -exec grep -c "router\." {} \; | paste -sd+ | bc 2>/dev/null || echo 0)
+    print_info "Total endpoints implemented: $endpoint_count"
 }
 
 # Parse command line arguments
@@ -318,12 +564,7 @@ fi
 # Convert to absolute path to avoid issues when changing directories
 ENDPOINTS_FILE=$(realpath "$ENDPOINTS_FILE")
 
-# Check if allowedTools.txt exists
-if [ ! -f "$ALLOWED_TOOLS_FILE" ]; then
-    print_error "allowedTools.txt file not found: $ALLOWED_TOOLS_FILE"
-    print_error "This file is required to specify which tools Claude can use"
-    exit 1
-fi
+# No need to check allowedTools.txt - each project has its own .mcp.json and settings.local.json
 
 print_info "Reading configuration from: $ENDPOINTS_FILE"
 
@@ -449,6 +690,11 @@ cd functions
 After changing to functions directory, you can run yarn/npm commands directly without 'cd functions &&' prefix.
 NOTE: When in functions directory, file paths should be relative to functions (e.g., src/controller/... not functions/src/controller/...)
 Track all operations for potential rollback. For each operation that creates or modifies something, log the rollback command.
+
+CRITICAL: FOLLOW ALL .MDC GUIDELINES
+Before starting ANY implementation:
+1. Read and follow ALL .mdc files in functions/.cursor/rules/general/*.mdc
+2. Create a checklist from the MDC rules to follow during implementation
 EOF
 }
 
@@ -467,8 +713,14 @@ generate_implementation_steps() {
 
 6. IMPLEMENT THE CODE LOCALLY$([ "$existing_markdown" = "true" ] && echo " based on existing markdown instructions" || echo " (instead of creating PR first)"):
 
-   $([ "$existing_markdown" = "false" ] && echo "IMPORTANT: You MUST read ALL files in /functions/**/.cursor/rules/*.mdc before implementation.
-   Strictly follow all guidelines for each layer (controller-layer.mdc, rest-http.mdc, etc.).
+   $([ "$existing_markdown" = "false" ] && echo "IMPORTANT: You MUST read and follow ALL files in /functions/.cursor/rules/general/*.mdc before implementation.
+   
+   PATTERN-BASED IMPLEMENTATION:
+   Based on the detected pattern from the endpoint path, ensure you implement:
+   - Request patterns: All state transitions (approve, reject, cancel)
+   - Transaction patterns: Atomic operations, balance updates
+   - Management patterns: Full CRUD operations
+   - Query patterns: Filtering, pagination, sorting
 
    ")Implementation approach (implement first, test later):
    
@@ -482,18 +734,54 @@ generate_implementation_steps() {
       4. Controller in src/controller/\${pathOfController}.ts
       5. Update src/api.ts to map endpoint base path to the new controller (prefer MultiEdit tool to avoid backup files)
       6. HTTP test file in rest/\${pathOfEndpoint}/\${HTTP_METHOD}_\${endpoint_description}.http
+      7. Unit tests following unit-test-guideline.mdc
    
    C. After ALL implementation is complete, validate and test:
       1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
-      2. Create basic unit tests for critical functionality
-      3. Test HTTP endpoints using the created .http files
+      2. Test HTTP endpoints using the created .http files
+      3. Run unit tests to ensure they pass
       4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
          - If there are errors, fix them and re-run until no errors remain
          - Only run this ONCE after all files are implemented
    
    D. Ensure the implementation handles all edge cases, validations, and error scenarios
 
-7. After successful local implementation and testing:
+7. IMPLEMENTATION VERIFICATION (PATTERN-BASED):
+   Before proceeding, verify ALL items based on the detected pattern:
+   
+   For REQUEST patterns:
+   [ ] All state transition endpoints implemented (approve, reject, cancel)
+   [ ] Email notifications configured for state changes
+   [ ] State validation in domain object
+   [ ] Audit trail for all actions
+   
+   For TRANSACTION patterns:
+   [ ] Atomic database operations using transactions
+   [ ] Balance calculations using calculation helpers
+   [ ] Transaction history maintained
+   [ ] Reversal logic implemented (if applicable)
+   
+   For MANAGEMENT patterns:
+   [ ] Complete CRUD operations (GET, POST, PUT, DELETE)
+   [ ] Proper validation for all operations
+   [ ] Bulk operations (if applicable)
+   
+   For QUERY patterns:
+   [ ] Pagination implemented
+   [ ] Filtering capabilities added
+   [ ] Sorting options available
+   [ ] Performance optimized
+   
+   COMMON VERIFICATIONS:
+   [ ] Domain object extends correct parent class
+   [ ] All abstract methods implemented
+   [ ] Repository queries actual data (no hardcoded values)
+   [ ] Authentication properly configured
+   [ ] TypeScript compilation passes (yarn tsc --noEmit)
+   [ ] HTTP test files created for ALL endpoints
+   [ ] Unit tests created and passing for all layers
+
+8. After successful local implementation and testing:
    - Clean up any backup files: rm -f src/api.ts.backup
    - Stage all implemented files: git add .
    - Commit with descriptive message:
@@ -505,14 +793,15 @@ generate_implementation_steps() {
      - Added \${controllerName} controller
      - Updated src/api.ts with endpoint mapping
      - Added HTTP test file
-     - TypeScript checks passed, basic tests implemented
+     - Added unit tests for all layers
+     - TypeScript checks passed, all tests implemented
    - Track commit for rollback: git reset --hard HEAD~1
 
-8. Push the implemented code to remote origin:
+9. Push the implemented code to remote origin:
    - Push branch: git push origin feature/implement-$endpoint_id
    - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
 
-9. Create a pull request targeting the develop branch (or current base branch):
+10. Create a pull request targeting the develop branch (or current base branch):
    - Target branch: develop (or the base branch that was checked out)
    - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
    - Body should include:
@@ -527,16 +816,16 @@ generate_implementation_steps() {
        - ✅ Controller: \${controllerName}
        - ✅ API Mapping: Updated src/api.ts
        - ✅ HTTP Test: \${HTTP_METHOD}_\${endpoint_description}.http
-       - ✅ Basic unit tests for critical functionality
+       - ✅ Unit tests: All layers tested
      * Testing status:
        - ✅ TypeScript compilation: PASSED
-       - ✅ Basic tests: PASSED
+       - ✅ Unit tests: PASSED
        - ✅ HTTP endpoint tests: VERIFIED
      * Base branch: $base_branch
      * Ready for code review and merge
    - Track PR creation for rollback (save PR number and URL)
 
-10. IMPORTANT: Save the PR information for future reference:
+11. IMPORTANT: Save the PR information for future reference:
     - Endpoint ID: $endpoint_id
     - PR Branch: feature/implement-$endpoint_id
     - PR URL: [save the actual PR URL]
@@ -550,6 +839,18 @@ ROLLBACK LOGGING: At the end, print a summary of all rollback commands that woul
 
 Please log progress at each step and report any errors encountered.
 $([ "$existing_markdown" = "true" ] && echo "Replace all \${...} placeholders with actual values from the existing markdown file." || echo "Replace all \${...} placeholders with actual values from the spreadsheet.")
+
+PROGRESS CHECKPOINTS (report after each):
+1. ✓ Spreadsheet data extracted with endpoint path: [show path]
+2. ✓ Pattern detected: [REQUEST/TRANSACTION/MANAGEMENT/QUERY]
+3. ✓ Domain analysis complete
+4. ✓ Base classes identified: [list them]
+5. ✓ Related endpoints found: [list them]
+6. ✓ MDC rules reviewed
+7. ✓ Implementation started
+8. ✓ All endpoints implemented: [list all created endpoints]
+9. ✓ TypeScript compilation passed
+10. ✓ PR created: [show URL]
 EOF
 }
 
@@ -674,7 +975,7 @@ $(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
     # Continue with common details
     PROMPT="${PROMPT}
    - REST API Method (GET, POST, PUT, DELETE, etc.)
-   - Endpoint Path (e.g., /api/v1/users)
+   - Endpoint Path (e.g., /api/v1/users) - CRITICAL: Store this for pattern detection
    - Use Case Name and Methods
    - Parameters
    - Service functions and methods
@@ -683,7 +984,22 @@ $(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
    - Request body schema
    - Response format
    - Required HTTP headers
-   - Any other implementation details
+   
+   PATTERN-BASED EXTRACTION:
+   After identifying the endpoint path, detect the implementation pattern:
+   - If path contains 'request' → Extract state transitions, approval logic, email triggers
+   - If path contains 'transaction/transfer/payment' → Extract balance logic, reversal rules, fees
+   - If path contains 'report/history/statement' → Extract filter params, aggregations, export formats
+   - Otherwise → Extract standard CRUD requirements
+   
+   CRITICAL EXTRACTIONS:
+   - Domain object properties (ALL fields, not just basic ones)
+   - Parent class/interface to extend (look for hints in spreadsheet)
+   - Related endpoints (other operations on same resource)
+   - Business rules and validations
+   - State diagram references
+   - Email notification requirements
+   - Transaction requirements (if any)
 "
     
     # Add cache saving instruction if reading from spreadsheet
@@ -698,18 +1014,44 @@ $(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
     # Continue with markdown creation
     PROMPT="${PROMPT}
 
+3b. PATTERN DETECTION AND DOMAIN ANALYSIS (MANDATORY - DO NOT SKIP):
+   
+   IMPORTANT: After extracting the endpoint path from spreadsheet:
+   1. Store the endpoint path in a variable for pattern detection
+   2. Detect the pattern type:
+      - If path contains 'request' → REQUEST pattern
+      - If path contains 'transaction/transfer/payment' → TRANSACTION pattern  
+      - If path contains 'report/history/statement' → QUERY pattern
+      - Otherwise → MANAGEMENT (CRUD) pattern
+   3. Report the detected pattern clearly
+   
+   Based on the detected pattern, perform domain analysis:
+   
+   1. Detect the implementation pattern from the endpoint path
+   2. Search for existing implementations with the same pattern
+   3. Find base classes to extend:
+      - For 'request' patterns → Look for BaseRequest, AbstractRequest
+      - For 'transaction' patterns → Look for BaseTransaction
+      - For general patterns → Look for domain-specific base classes
+   4. Identify ALL required operations based on the pattern
+   5. Check for .puml diagrams in the domain folder
+   6. List all related endpoints that work together
+
 4. Create a markdown file with comprehensive instructions for Claude Code Action:
-   - MANDATORY: First, read ALL .mdc files in functions/**/.cursor/rules/*.mdc
+   - MANDATORY: The markdown MUST instruct to read ALL .mdc files in functions/.cursor/rules/general/*.mdc
    - Create the instruction file at: $md_destination/\${NameOfUseCase}UseCase.md
    - Ensure the directory exists before creating the file (track directory creation for rollback)
    - The markdown should contain clear instructions for AI to implement:
-     * The complete use case with all methods
+     * The complete use case with all methods (based on pattern analysis)
      * All service functions and methods mentioned in the spreadsheet
      * All repository functions and methods mentioned in the spreadsheet
-     * Controller implementation
-     * HTTP test file
+     * Controller implementation WITH ALL CRUD/ACTION ENDPOINTS
+     * HTTP test files for EACH endpoint
      * Parameter validations and types
      * Error handling
+     * Domain hierarchy (which class to extend)
+     * State transitions (if applicable)
+     * Email notifications (if state changes exist)
      * Testing requirements: Must pass 'yarn tsc --noEmit' (fix all TypeScript errors) (run from functions directory)
    - Track file creation for rollback: rm $md_destination/\${NameOfUseCase}UseCase.md
 
@@ -751,10 +1093,12 @@ $(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
 EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destination/
 
 1. Read the existing markdown file(s) in $md_destination/ directory
-2. Use the instructions from the existing markdown to implement the code
-3. Follow all implementation requirements specified in the existing markdown
+2. MANDATORY: Also read ALL .mdc files in functions/.cursor/rules/general/*.mdc
+3. Use the instructions from the existing markdown to implement the code
+4. Follow all implementation requirements specified in the existing markdown
+5. Ensure implementation follows all MDC guidelines
 
-4. Create a new Git branch:
+6. Create a new Git branch:
    - First, checkout the base branch: $BASE_BRANCH
    - Create new branch from it: 'feature/implement-$endpoint_id'
    - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
@@ -768,7 +1112,7 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
     # Execute Claude for this endpoint
     if [ "$DRY_RUN" = true ]; then
         print_info "[DRY RUN] Would execute Claude for endpoint: $endpoint_id"
-        print_info "[DRY RUN] Command: claude --allowedTools \"$(paste -sd, "$ALLOWED_TOOLS_FILE")\" -p \"[PROMPT]\""
+        print_info "[DRY RUN] Command: claude -p \"[PROMPT]\""
         print_success "[DRY RUN] Would process endpoint: $endpoint_id"
         PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
     else
@@ -785,7 +1129,7 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
         
         # Run Claude with direct output to terminal
         print_info "Starting Claude local implementation for endpoint: $endpoint_id"
-        print_info "Timeout set to 1 hour for implementation and testing..."
+        print_info "Timeout set to 2 hours for implementation and testing..."
         print_info "========================================="
         print_info "CLAUDE OUTPUT (REAL-TIME):"
         print_info "========================================="
@@ -798,17 +1142,18 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
         fi
         
         # Debug: Show what will be executed
-        print_info "About to execute Claude with these tools:"
-        echo "Tools: $(paste -sd, "$ALLOWED_TOOLS_FILE")"
+        print_info "About to execute Claude (will use .mcp.json and settings.local.json from project)"
         print_info "Prompt preview (first 200 chars): ${PROMPT:0:200}..."
         
-        # Run Claude with timeout and direct output to terminal (foreground)
-        CLAUDE_TIMEOUT=${CLAUDE_TIMEOUT:-3600}
-        print_info "Starting Claude execution..."
-        print_info "Claude output will appear below:"
+        # Run Claude with timeout and direct output to terminal (real-time)
+        CLAUDE_TIMEOUT=${CLAUDE_TIMEOUT:-7200}  # 2 hours for complex implementations
+        print_info "Starting Claude local implementation for endpoint: $endpoint_id"
+        print_info "Timeout set to 2 hours for implementation and testing..."
+        print_info "Claude output will appear below in real-time:"
         echo ""
         
-        timeout $CLAUDE_TIMEOUT claude --allowedTools "$(paste -sd, "$ALLOWED_TOOLS_FILE")" -p "$PROMPT"
+        # Run Claude directly to show real-time output
+        timeout $CLAUDE_TIMEOUT claude -p "$PROMPT"
         CLAUDE_EXIT_CODE=$?
         
         echo ""
