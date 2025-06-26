@@ -240,13 +240,28 @@ usage() {
     echo "  [Backend]{{endpointId}} {{restAPIMethod}} {{endpointPath}} {{useCaseName}}"
     echo ""
     echo "IMPLEMENTATION SCOPE:"
-    echo "  The script reads from REST API spreadsheet and creates PRs with instructions to implement:"
+    echo "  The script reads from REST API spreadsheet and implements code locally:"
     echo "  - Use Case functions and methods"
     echo "  - Service layer functions and methods"
-    echo "  - Repository layer functions and methods"
+    echo "  - Repository layer functions and methods"  
     echo "  - Controller with authentication and routing"
     echo "  - HTTP test files for endpoint testing"
-    echo "  - All components must pass 'yarn tsc --noEmit' without errors"
+    echo "  - Unit tests for all components"
+    echo "  - All components must pass 'yarn tsc --noEmit' and 'yarn lint' without errors"
+    echo "  - Creates PR only after successful local implementation and testing"
+    echo ""
+    echo "LOCAL IMPLEMENTATION WORKFLOW:"
+    echo "  - First action: cd functions (change to functions directory)"
+    echo "  - Read all coding guidelines from /functions/.cursor/rules/*.mdc"
+    echo "  - Implementation approach:"
+    echo "    1. Implement all components (use case, service, repository, controller)"
+    echo "    2. Create HTTP test files"
+    echo "    3. Run 'yarn tsc --noEmit' to check TypeScript errors"
+    echo "    4. Run 'yarn lint' for code style checking"
+    echo "    5. Create basic unit tests for critical parts"
+    echo "    6. Test HTTP endpoints with .http files"
+    echo "  - Create PR only after implementation passes all checks"
+    echo "  - Timeout: 1 hour maximum for implementation"
     echo ""
     echo "RELATED PR BRANCHING:"
     echo "  The script will automatically detect related PRs in the same directory"
@@ -490,6 +505,13 @@ while IFS= read -r line || [ -n "$line" ]; do
     PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
 
 IMPORTANT: You are now in the repository directory: $(pwd)
+PROJECT STRUCTURE: This is a Firebase Functions project. 
+
+FIRST STEP: Change to the functions directory for all package manager commands:
+cd functions
+
+After changing to functions directory, you can run yarn/npm commands directly without 'cd functions &&' prefix.
+NOTE: When in functions directory, file paths should be relative to functions (e.g., src/controller/... not functions/src/controller/...)
 Track all operations for potential rollback. For each operation that creates or modifies something, log the rollback command.
 
 1. Read the Google Sheets spreadsheet named '$SPREADSHEET_NAME'
@@ -519,9 +541,9 @@ Track all operations for potential rollback. For each operation that creates or 
      * All repository functions and methods mentioned in the spreadsheet
      * Controller implementation requirements:
        - Follow the guidelines in /functions/.cursor/rules/controller-layer.md
-       - File path: src/controller/\${controllerPath}/\${controllerName}.ts
+       - File path: src/controller/\${controllerPath}/\${controllerName}.ts (relative to functions directory)
      * HTTP test file requirements:
-       - File path: functions/rest/\${restPath}/\${apiMethod}_\${apiPathBy}_\${caseType}.http
+       - File path: rest/\${restPath}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (relative to functions directory)
        - Naming format: APIMETHOD_apiPathBy_case.http (e.g., GET_debitCardsByUserId_query.http)
        - IMPORTANT: apiMethod must be uppercase (GET, POST, PUT, DELETE, etc.)
        - Endpoint documentation
@@ -530,7 +552,7 @@ Track all operations for potential rollback. For each operation that creates or 
      * Parameter validations and types
      * Error handling
      * Check and implement any missing domain objects mentioned in the spreadsheet
-     * Testing requirements: Must pass 'yarn lint', 'yarn tsc --noEmit' without errors
+     * Testing requirements: Must pass 'yarn tsc --noEmit' (fix all TypeScript errors), then 'yarn lint' (run from functions directory)
    - Track file creation for rollback: rm $md_destination/\${NameOfUseCase}UseCase.md
 
 5. Create a new Git branch:
@@ -538,61 +560,76 @@ Track all operations for potential rollback. For each operation that creates or 
    - Create new branch from it: 'feature/implement-$endpoint_id'
    - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
 
-6. Stage and commit the newly created markdown file with message:
-   docs: Add full implementation spec for \${NameOfUseCase}
-   
-   Added comprehensive specification for implementing:
-   - \${NameOfUseCase} use case
-   - Related service functions
-   - Related repository functions
-   Based on endpoint $endpoint_id from the REST API spreadsheet.
-   - Track commit for rollback: git reset --hard HEAD~1
-
-7. Push the branch to remote origin
-   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
-
-8. Create a pull request with:
-   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName}'
-   - Body should include:
-     * Brief description of the use case
-     * REST API Method: \${restAPIMethod}
-     * Endpoint Path: \${endpointPath}
-     * Components to implement:
-       - Use Case: \${useCaseMethods}
-       - Service: \${serviceMethods}
-       - Repository: \${repositoryMethods}
-       - Controller: \${controllerName}
-       - HTTP Test: \${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
-     * Base branch: $BASE_BRANCH
-   - Track PR creation for rollback (save PR number and URL)
-
-9. Add a comment to the PR:
-   @claude
-
-   Please implement the complete backend for \${NameOfUseCase}
-
-   You can find the full specification in:
-   /$md_destination/\${NameOfUseCase}UseCase.md
+6. IMPLEMENT THE CODE LOCALLY (instead of creating PR first):
 
    IMPORTANT: You MUST read ALL files in /functions/.cursor/rules/*.mdc before implementation.
    Strictly follow all guidelines including domain object implementation.
    For controller implementation, follow /functions/.cursor/rules/controller-layer.md.
 
-   Please implement:
-   1. Use Case in src/useCase/\${pathOfUseCase}.ts
-   2. Service functions in src/service/\${pathOfService}.ts
-   3. Repository functions in src/repository/\${pathOfRepository}.ts
-   4. Controller in src/controller/\${pathOfController}.ts
-   5. HTTP test file in functions/rest/\${pathOfEndpoint}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
-   6. Any necessary interfaces, types, or domain models
-   7. Unit tests for all components
+   Implementation approach (implement first, test later):
+   
+   A. First, implement the domain objects and types:
+      - Check and implement any missing domain objects mentioned in the spreadsheet
+      - Create necessary interfaces and types
+   
+   B. Implement core components:
+      1. Use Case in src/useCase/\${pathOfUseCase}.ts
+      2. Service functions in src/service/\${pathOfService}.ts
+      3. Repository functions in src/repository/\${pathOfRepository}.ts
+      4. Controller in src/controller/\${pathOfController}.ts
+      5. HTTP test file in rest/\${pathOfEndpoint}/\${apiMethod}_\${apiPathBy}_\${caseType}.http (apiMethod in uppercase)
+   
+   C. After implementation, validate and test:
+      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
+      2. Run 'yarn tsc --noEmit' to check for TypeScript errors
+         - Fix any TypeScript errors that appear
+         - Re-run until no errors remain
+      3. Run 'yarn lint' to check code style and fix any issues
+      4. Create basic unit tests for critical functionality
+      5. Test HTTP endpoints using the created .http files
+      6. Ensure basic functionality works correctly
+   
+   D. Ensure the implementation handles all edge cases, validations, and error scenarios
 
-   CRITICAL: After implementation, you MUST:
-   1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
-   2. Run 'yarn tsc --noEmit' or similar TypeScript check command to ensure no TypeScript errors
-   3. Fix any errors before marking the task as complete
+7. After successful local implementation and testing:
+   - Stage all implemented files: git add .
+   - Commit with descriptive message:
+     feat: Implement \${NameOfUseCase} endpoint $endpoint_id
+     
+     - Added \${useCaseMethods} use case
+     - Added \${serviceMethods} service functions  
+     - Added \${repositoryMethods} repository functions
+     - Added \${controllerName} controller
+     - Added HTTP test file
+     - TypeScript and lint checks passed, basic tests implemented
+   - Track commit for rollback: git reset --hard HEAD~1
 
-   The implementation should handle all edge cases, validations, and error scenarios.
+8. Push the implemented code to remote origin:
+   - Push branch: git push origin feature/implement-$endpoint_id
+   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
+
+9. Create a pull request with:
+   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
+   - Body should include:
+     * Brief description of the use case
+     * REST API Method: \${restAPIMethod}
+     * Endpoint Path: \${endpointPath}
+     * ✅ IMPLEMENTATION COMPLETED locally
+     * Components implemented:
+       - ✅ Use Case: \${useCaseMethods}
+       - ✅ Service: \${serviceMethods}
+       - ✅ Repository: \${repositoryMethods}
+       - ✅ Controller: \${controllerName}
+       - ✅ HTTP Test: \${apiMethod}_\${apiPathBy}_\${caseType}.http
+       - ✅ Basic unit tests for critical functionality
+     * Testing status:
+       - ✅ TypeScript compilation: PASSED
+       - ✅ Linting: PASSED
+       - ✅ Basic tests: PASSED
+       - ✅ HTTP endpoint tests: VERIFIED
+     * Base branch: $BASE_BRANCH
+     * Ready for code review and merge
+   - Track PR creation for rollback (save PR number and URL)
 
 10. IMPORTANT: Save the PR information for future reference:
     - Endpoint ID: $endpoint_id
@@ -639,14 +676,16 @@ Replace all \${...} placeholders with actual values from the spreadsheet."
         ORIGINAL_DIR=$(pwd)
         
         # Run Claude and capture output with progress indicator
-        print_info "Starting Claude execution for endpoint: $endpoint_id"
-        print_info "This may take several minutes..."
+        print_info "Starting Claude local implementation for endpoint: $endpoint_id"
+        print_info "Timeout set to 1 hour for implementation and testing..."
         
         # Create a temporary file for Claude output
         CLAUDE_OUTPUT=$(mktemp)
         
-        # Run Claude in background to show progress
-        claude --allowedTools "$(paste -sd, "$ALLOWED_TOOLS_FILE")" -p "$PROMPT" < /dev/null > "$CLAUDE_OUTPUT" 2>&1 &
+        # Run Claude in background to show progress with 1 hour timeout
+        # 1 hour should be enough for implementation and testing
+        CLAUDE_TIMEOUT=${CLAUDE_TIMEOUT:-3600}
+        timeout $CLAUDE_TIMEOUT claude --allowedTools "$(paste -sd, "$ALLOWED_TOOLS_FILE")" -p "$PROMPT" < /dev/null > "$CLAUDE_OUTPUT" 2>&1 &
         CLAUDE_PID=$!
         
         # Show progress while Claude processes the endpoint
