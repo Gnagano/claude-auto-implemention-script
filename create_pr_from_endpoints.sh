@@ -2,6 +2,9 @@
 # create_pr_from_endpoints.sh
 # Read endpoints from file, create PRs with specifications for each endpoint
 
+# Base branch configuration - can be overridden by environment variable
+BASE_BRANCH="${BASE_BRANCH:-feature/debit-card-replacement-request-base}"
+
 # Colored message functions
 print_info() {
     echo -e "\033[34m[INFO]\033[0m $1"
@@ -20,48 +23,10 @@ print_warning() {
 }
 
 
-# Default values
+# Fixed configuration - single mode operation
 AUTO_ROLLBACK=true
-CONFIRM_EACH_ENDPOINT=false
-DRY_RUN=false
-ROLLBACK_ALL_ON_ANY_FAILURE=false
-ROLLBACK_ALL_AT_END=false
 USE_CACHE=true
-FORCE_REFRESH_CACHE=false
 CACHE_DIR="${CACHE_DIR:-/tmp/claude_pr_cache}"
-
-# Function to show progress dots every 10 seconds
-show_progress() {
-    local pid=$1
-    local message=$2
-    local dots=""
-    local elapsed=0
-    
-    # Print initial message to stderr (unbuffered)
-    echo -n "$message" >&2
-    
-    while kill -0 $pid 2>/dev/null; do
-        # Print dot to stderr to avoid buffering
-        echo -n "." >&2
-        dots="${dots}."
-        elapsed=$((elapsed + 10))
-        
-        # Show elapsed time every 30 seconds
-        if [ $((elapsed % 30)) -eq 0 ]; then
-            echo -n " [${elapsed}s]" >&2
-        fi
-        
-        # Clear line and restart dots after 12 dots (2 minutes)
-        if [ ${#dots} -eq 12 ]; then
-            echo -ne "\r\033[K$message" >&2
-            dots=""
-        fi
-        
-        sleep 10
-    done
-    
-    echo " Done! [Total: ${elapsed}s]" >&2
-}
 
 # Rollback tracking arrays
 declare -a ROLLBACK_OPERATIONS=()
@@ -180,42 +145,100 @@ find_related_pr() {
     echo "$related_branch"
 }
 
-# Function to ask for confirmation
-ask_confirmation() {
-    local message="$1"
-    local default="${2:-n}"
+# Function to ensure we're in functions directory
+ensure_functions_directory() {
+    if [[ ! "$(pwd)" == *"/functions" ]]; then
+        if [ -d "functions" ]; then
+            cd functions
+            print_info "Changed to functions directory: $(pwd)"
+        else
+            print_error "functions directory not found from $(pwd)"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Function to validate MDC compliance
+validate_mdc_compliance() {
+    local mdc_files=$(find .cursor/rules/general -name "*.mdc" 2>/dev/null | wc -l)
+    if [ "$mdc_files" -eq 0 ]; then
+        print_warning "No .mdc files found in .cursor/rules/general/"
+        return 1
+    fi
+    print_info "Found $mdc_files MDC guideline files"
+    return 0
+}
+
+# Function to run TypeScript validation
+validate_typescript() {
+    ensure_functions_directory || return 1
     
-    if [ "$default" = "y" ]; then
-        prompt="$message [Y/n]: "
+    print_info "Running TypeScript compilation check..."
+    if yarn tsc --noEmit; then
+        print_success "TypeScript compilation passed"
+        return 0
     else
-        prompt="$message [y/N]: "
+        print_error "TypeScript compilation failed"
+        print_info "Fix all TypeScript errors before proceeding"
+        return 1
+    fi
+}
+
+# Function to run tests with validation
+run_tests_with_validation() {
+    ensure_functions_directory || return 1
+    
+    # Check for test command in package.json
+    if grep -q '"test"' package.json; then
+        print_info "Running tests..."
+        if yarn test; then
+            print_success "All tests passed"
+            return 0
+        else
+            print_error "Tests failed - implementation incomplete"
+            return 1
+        fi
+    else
+        print_warning "No test script found in package.json"
+        return 1
+    fi
+}
+
+# Function to validate complete implementation
+validate_implementation() {
+    local endpoint_id="$1"
+    
+    print_info "Validating implementation for $endpoint_id..."
+    
+    # 1. Ensure we're in functions directory
+    ensure_functions_directory || return 1
+    
+    # 2. Validate MDC compliance was checked
+    validate_mdc_compliance || return 1
+    
+    # 3. Run TypeScript check
+    validate_typescript || return 1
+    
+    # 4. Run tests
+    run_tests_with_validation || return 1
+    
+    # 5. Verify HTTP test files exist
+    if ! find rest/ -name "*${endpoint_id}*" -o -name "*.http" | grep -q .; then
+        print_error "No HTTP test files found for $endpoint_id"
+        return 1
     fi
     
-    read -p "$prompt" response
-    response=${response:-$default}
-    
-    case "$response" in
-        [yY]|[yY][eE][sS]) return 0 ;;
-        *) return 1 ;;
-    esac
+    print_success "All validations passed for $endpoint_id"
+    return 0
 }
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 [OPTIONS] <endpoints_file>"
+    echo "Usage: $0 <endpoints_file>"
     echo ""
     echo "ARGUMENTS:"
     echo "  endpoints_file    Path to endpoints configuration file (required)"
-    echo ""
-    echo "OPTIONS:"
-    echo "  --no-rollback          Disable automatic rollback on failure"
-    echo "  --confirm-each         Ask for confirmation before processing each endpoint"
-    echo "  --dry-run             Show what would be done without executing"
-    echo "  --rollback-all-on-failure  Rollback ALL successful endpoints if ANY endpoint fails"
-    echo "  --rollback-all-at-end     Ask to rollback all endpoints at the end"
-    echo "  --no-cache            Disable spreadsheet caching"
-    echo "  --refresh-cache       Force refresh cached spreadsheet data"
-    echo "  -h, --help            Show this help message"
     echo ""
     echo "CONFIGURATION FILE FORMAT:"
     echo "  Global configuration:"
@@ -232,55 +255,20 @@ usage() {
     echo "  CONFIG:REPO_PATH=/path/to/repo"
     echo "  BE07-0201-12|functions/vault/useCase/loan/loanRequest"
     echo "  BE07-0202-01|functions/vault/useCase/loan/loanApproval"
-    echo "  BE07-0301-01|functions/vault/useCase/credit/creditCheck"
     echo ""
-    echo "ENVIRONMENT VARIABLES:"
-    echo "  Note: Claude will use .mcp.json and settings.local.json from each project"
+    echo "WORKFLOW:"
+    echo "  1. Read REST API design from Google Sheets"
+    echo "  2. Create markdown file with implementation instructions"
+    echo "  3. Implement all components locally (use case, service, repository, controller)"
+    echo "  4. Create HTTP test files and unit tests"
+    echo "  5. Validate TypeScript compilation and test execution"
+    echo "  6. Create pull request with implemented code"
     echo ""
-    echo "MCP CONFIGURATION:"
-    echo "  The script expects a .mcp.json file in the repository root directory"
-    echo "  This file should contain the MCP server configuration for the project"
-    echo ""
-    echo "PR TITLE FORMAT:"
-    echo "  [Backend]{{endpointId}} {{restAPIMethod}} {{endpointPath}} {{useCaseName}}"
-    echo ""
-    echo "IMPLEMENTATION SCOPE:"
-    echo "  The script reads from REST API spreadsheet and implements code locally:"
-    echo "  - Use Case functions and methods"
-    echo "  - Service layer functions and methods"
-    echo "  - Repository layer functions and methods"  
-    echo "  - Controller with authentication and routing"
-    echo "  - HTTP test files for endpoint testing"
-    echo "  - Unit tests for all components"
-    echo "  - All components must pass 'yarn tsc --noEmit' without errors"
-    echo "  - Creates PR only after successful local implementation and testing"
-    echo ""
-    echo "LOCAL IMPLEMENTATION WORKFLOW:"
-    echo "  - First action: cd functions (change to functions directory)"
-    echo "  - Read all coding guidelines from /functions/.cursor/rules/general/*.mdc"
-    echo "  - Implementation approach:"
-    echo "    1. Implement all components (use case, service, repository, controller)"
-    echo "    2. Create HTTP test files"
-    echo "    3. Run 'yarn tsc --noEmit' to check TypeScript errors"
-    echo "    4. Create basic unit tests"
-    echo "    5. Create HTTP endpoints with .http files"
-    echo "  - Create PR only after implementation passes all checks"
-    echo "  - Timeout: 2 hours maximum for implementation"
-    echo ""
-    echo "RELATED PR BRANCHING:"
-    echo "  The script will automatically detect related PRs in the same directory"
-    echo "  and create new branches from them instead of from main branch"
-    echo ""
-    echo "ROLLBACK SCENARIOS:"
-    echo "  1. Individual endpoint failure: Rollback just that endpoint (default)"
-    echo "  2. User rejection: Manual rollback after successful processing (with --confirm-each)"
-    echo "  3. Global rollback on any failure: Rollback ALL if ANY fails (--rollback-all-on-failure)"
-    echo "  4. Global rollback at end: Ask to rollback all at completion (--rollback-all-at-end)"
-    echo ""
-    echo "ROLLBACK TRACKING:"
-    echo "  - Git operations: branches, commits, pushes"
-    echo "  - File operations: file creation, directory creation"
-    echo "  - GitHub operations: PR creation and comments"
+    echo "REQUIREMENTS:"
+    echo "  - .mcp.json file in repository root"
+    echo "  - functions/.cursor/rules/general/*.mdc files for coding guidelines"
+    echo "  - All work done in functions/ directory"
+    echo "  - Must pass 'yarn tsc --noEmit' and 'yarn test'"
     exit ${1:-0}
 }
 
@@ -498,38 +486,13 @@ post_implementation_review() {
     print_info "Total endpoints implemented: $endpoint_count"
 }
 
-# Parse command line arguments
+# Parse command line arguments - simplified single mode
 ENDPOINTS_FILE=""
-while [[ $# -gt 0 ]]; do
+if [ $# -eq 0 ]; then
+    print_error "Missing required argument: endpoints_file"
+    usage 1
+elif [ $# -eq 1 ]; then
     case $1 in
-        --no-rollback)
-            AUTO_ROLLBACK=false
-            shift
-            ;;
-        --confirm-each)
-            CONFIRM_EACH_ENDPOINT=true
-            shift
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --rollback-all-on-failure)
-            ROLLBACK_ALL_ON_ANY_FAILURE=true
-            shift
-            ;;
-        --rollback-all-at-end)
-            ROLLBACK_ALL_AT_END=true
-            shift
-            ;;
-        --no-cache)
-            USE_CACHE=false
-            shift
-            ;;
-        --refresh-cache)
-            FORCE_REFRESH_CACHE=true
-            shift
-            ;;
         -h|--help)
             usage 0
             ;;
@@ -538,16 +501,13 @@ while [[ $# -gt 0 ]]; do
             usage 1
             ;;
         *)
-            if [ -z "$ENDPOINTS_FILE" ]; then
-                ENDPOINTS_FILE="$1"
-            else
-                print_error "Too many arguments. Only one endpoints file is allowed"
-                usage 1
-            fi
-            shift
+            ENDPOINTS_FILE="$1"
             ;;
     esac
-done
+else
+    print_error "Too many arguments. Usage: $0 <endpoints_file>"
+    usage 1
+fi
 
 # Check if endpoints file was provided
 if [ -z "$ENDPOINTS_FILE" ]; then
@@ -698,161 +658,7 @@ Before starting ANY implementation:
 EOF
 }
 
-# Function to generate implementation steps
-generate_implementation_steps() {
-    local endpoint_id="$1"
-    local base_branch="$2"
-    local existing_markdown="$3"
-    
-    cat << EOF
-
-5. Create a new Git branch:
-   - First, checkout the base branch: $base_branch
-   - Create new branch from it: 'feature/implement-$endpoint_id'
-   - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
-
-6. IMPLEMENT THE CODE LOCALLY$([ "$existing_markdown" = "true" ] && echo " based on existing markdown instructions" || echo " (instead of creating PR first)"):
-
-   $([ "$existing_markdown" = "false" ] && echo "IMPORTANT: You MUST read and follow ALL files in /functions/.cursor/rules/general/*.mdc before implementation.
-   
-   PATTERN-BASED IMPLEMENTATION:
-   Based on the detected pattern from the endpoint path, ensure you implement:
-   - Request patterns: All state transitions (approve, reject, cancel)
-   - Transaction patterns: Atomic operations, balance updates
-   - Management patterns: Full CRUD operations
-   - Query patterns: Filtering, pagination, sorting
-
-   ")Implementation approach (implement first, test later):
-   
-   A. First, implement the domain objects and types:
-      - Create necessary interfaces and types
-   
-   B. Implement core components$([ "$existing_markdown" = "true" ] && echo " as specified in the existing markdown" || echo ""):
-      1. Use Case in src/useCase/\${pathOfUseCase}.ts
-      2. Service functions in src/service/\${pathOfService}.ts
-      3. Repository functions in src/repository/\${pathOfRepository}.ts
-      4. Controller in src/controller/\${pathOfController}.ts
-      5. Update src/api.ts to map endpoint base path to the new controller (prefer MultiEdit tool to avoid backup files)
-      6. HTTP test file in rest/\${pathOfEndpoint}/\${HTTP_METHOD}_\${endpoint_description}.http
-      7. Unit tests following unit-test-guideline.mdc
-   
-   C. After ALL implementation is complete, validate and test:
-      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
-      2. Test HTTP endpoints using the created .http files
-      3. Run unit tests to ensure they pass
-      4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
-         - If there are errors, fix them and re-run until no errors remain
-         - Only run this ONCE after all files are implemented
-   
-   D. Ensure the implementation handles all edge cases, validations, and error scenarios
-
-7. IMPLEMENTATION VERIFICATION (PATTERN-BASED):
-   Before proceeding, verify ALL items based on the detected pattern:
-   
-   For REQUEST patterns:
-   [ ] All state transition endpoints implemented (approve, reject, cancel)
-   [ ] Email notifications configured for state changes
-   [ ] State validation in domain object
-   [ ] Audit trail for all actions
-   
-   For TRANSACTION patterns:
-   [ ] Atomic database operations using transactions
-   [ ] Balance calculations using calculation helpers
-   [ ] Transaction history maintained
-   [ ] Reversal logic implemented (if applicable)
-   
-   For MANAGEMENT patterns:
-   [ ] Complete CRUD operations (GET, POST, PUT, DELETE)
-   [ ] Proper validation for all operations
-   [ ] Bulk operations (if applicable)
-   
-   For QUERY patterns:
-   [ ] Pagination implemented
-   [ ] Filtering capabilities added
-   [ ] Sorting options available
-   [ ] Performance optimized
-   
-   COMMON VERIFICATIONS:
-   [ ] Domain object extends correct parent class
-   [ ] All abstract methods implemented
-   [ ] Repository queries actual data (no hardcoded values)
-   [ ] Authentication properly configured
-   [ ] TypeScript compilation passes (yarn tsc --noEmit)
-   [ ] HTTP test files created for ALL endpoints
-   [ ] Unit tests created and passing for all layers
-
-8. After successful local implementation and testing:
-   - Clean up any backup files: rm -f src/api.ts.backup
-   - Stage all implemented files: git add .
-   - Commit with descriptive message:
-     feat: Implement \${NameOfUseCase} endpoint $endpoint_id
-     
-     - Added \${useCaseMethods} use case
-     - Added \${serviceMethods} service functions  
-     - Added \${repositoryMethods} repository functions
-     - Added \${controllerName} controller
-     - Updated src/api.ts with endpoint mapping
-     - Added HTTP test file
-     - Added unit tests for all layers
-     - TypeScript checks passed, all tests implemented
-   - Track commit for rollback: git reset --hard HEAD~1
-
-9. Push the implemented code to remote origin:
-   - Push branch: git push origin feature/implement-$endpoint_id
-   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
-
-10. Create a pull request targeting the develop branch (or current base branch):
-   - Target branch: develop (or the base branch that was checked out)
-   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
-   - Body should include:
-     * Brief description of the use case
-     * REST API Method: \${restAPIMethod}
-     * Endpoint Path: \${endpointPath}
-     * ✅ IMPLEMENTATION COMPLETED locally
-     * Components implemented:
-       - ✅ Use Case: \${useCaseMethods}
-       - ✅ Service: \${serviceMethods}
-       - ✅ Repository: \${repositoryMethods}
-       - ✅ Controller: \${controllerName}
-       - ✅ API Mapping: Updated src/api.ts
-       - ✅ HTTP Test: \${HTTP_METHOD}_\${endpoint_description}.http
-       - ✅ Unit tests: All layers tested
-     * Testing status:
-       - ✅ TypeScript compilation: PASSED
-       - ✅ Unit tests: PASSED
-       - ✅ HTTP endpoint tests: VERIFIED
-     * Base branch: $base_branch
-     * Ready for code review and merge
-   - Track PR creation for rollback (save PR number and URL)
-
-11. IMPORTANT: Save the PR information for future reference:
-    - Endpoint ID: $endpoint_id
-    - PR Branch: feature/implement-$endpoint_id
-    - PR URL: [save the actual PR URL]
-    - Destination: $md_destination
-
-ROLLBACK LOGGING: At the end, print a summary of all rollback commands that would undo the operations:
-- File operations (rm commands)
-- Directory operations (rmdir commands)  
-- Git operations (branch deletion, reset commands, remote deletion)
-- PR operations (PR number for manual closure)
-
-Please log progress at each step and report any errors encountered.
-$([ "$existing_markdown" = "true" ] && echo "Replace all \${...} placeholders with actual values from the existing markdown file." || echo "Replace all \${...} placeholders with actual values from the spreadsheet.")
-
-PROGRESS CHECKPOINTS (report after each):
-1. ✓ Spreadsheet data extracted with endpoint path: [show path]
-2. ✓ Pattern detected: [REQUEST/TRANSACTION/MANAGEMENT/QUERY]
-3. ✓ Domain analysis complete
-4. ✓ Base classes identified: [list them]
-5. ✓ Related endpoints found: [list them]
-6. ✓ MDC rules reviewed
-7. ✓ Implementation started
-8. ✓ All endpoints implemented: [list all created endpoints]
-9. ✓ TypeScript compilation passed
-10. ✓ PR created: [show URL]
-EOF
-}
+# Function removed - implementation steps now inline
 
 # Create cache directory if needed
 if [ "$USE_CACHE" = true ] && [ ! -d "$CACHE_DIR" ]; then
@@ -928,12 +734,13 @@ while IFS= read -r line || [ -n "$line" ]; do
     print_info "  Destination folder: $md_destination"
     
     # Find related PR if exists
-    BASE_BRANCH=$(find_related_pr "$md_destination")
-    if [ -z "$BASE_BRANCH" ]; then
-        BASE_BRANCH="develop"
-        print_info "No related PR found. Will branch from: $BASE_BRANCH"
+    RELATED_BRANCH=$(find_related_pr "$md_destination")
+    if [ -z "$RELATED_BRANCH" ]; then
+        CURRENT_BASE_BRANCH="$BASE_BRANCH"
+        print_info "No related PR found. Will branch from: $CURRENT_BASE_BRANCH"
     else
-        print_info "Found related PR. Will branch from: $BASE_BRANCH"
+        CURRENT_BASE_BRANCH="$RELATED_BRANCH"
+        print_info "Found related PR. Will branch from: $CURRENT_BASE_BRANCH"
     fi
     
     # Check cache for this endpoint
@@ -952,7 +759,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         # Use cached data prompt
         PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
 
-$(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
+$(generate_common_prompt "$endpoint_id" "$CURRENT_BASE_BRANCH" "$md_destination")
 
 1. Read the cached spreadsheet data from file: $CACHE_FILE
 
@@ -963,7 +770,7 @@ $(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
         # Original prompt with spreadsheet reading
         PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
 
-$(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
+$(generate_common_prompt "$endpoint_id" "$CURRENT_BASE_BRANCH" "$md_destination")
 
 1. Read the Google Sheets spreadsheet named '$SPREADSHEET_NAME'
 
@@ -1055,7 +862,139 @@ $(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
      * Testing requirements: Must pass 'yarn tsc --noEmit' (fix all TypeScript errors) (run from functions directory)
    - Track file creation for rollback: rm $md_destination/\${NameOfUseCase}UseCase.md
 
-$(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "false")"
+
+5. Create a new Git branch:
+   - First, checkout the base branch: $CURRENT_BASE_BRANCH
+   - Create new branch from it: 'feature/implement-$endpoint_id'
+   - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
+
+6. IMPLEMENT THE CODE LOCALLY:
+
+   IMPORTANT: You MUST read and follow ALL files in /functions/.cursor/rules/general/*.mdc before implementation.
+   
+   Implementation approach (implement first, test later):
+   
+   A. First, implement the domain objects and types:
+      - Create necessary interfaces and types
+   
+   B. Implement core components:
+      1. Use Case in src/useCase/\${pathOfUseCase}.ts
+      2. Service functions in src/service/\${pathOfService}.ts
+      3. Repository functions in src/repository/\${pathOfRepository}.ts
+      4. Controller in src/controller/\${pathOfController}.ts
+      5. Update src/api.ts to map endpoint base path to the new controller (prefer MultiEdit tool to avoid backup files)
+      6. HTTP test file in rest/\${pathOfEndpoint}/\${HTTP_METHOD}_\${endpoint_description}.http
+      7. Unit tests for ALL components:
+         - Create unit tests in __tests__ directory or alongside source files
+         - Test files should be named: *.test.ts or *.spec.ts
+         - Write tests for:
+           * Use Case: Test all methods with different scenarios
+           * Service: Test business logic and error handling
+           * Repository: Test data access and query logic
+           * Controller: Test endpoints, auth, validation
+         - Follow unit-test-guideline.mdc if exists
+         - Ensure all tests pass before proceeding
+   
+   C. After ALL implementation is complete, validate and test:
+      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
+      2. Test HTTP endpoints using the created .http files
+      3. MANDATORY: Run unit tests to ensure they pass:
+         - Run 'yarn test' or 'npm test' (check package.json for correct command)
+         - All tests MUST pass before proceeding
+         - If tests fail, fix them and re-run
+      4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
+         - If there are errors, fix them and re-run until no errors remain
+         - Only run this ONCE after all files are implemented
+   
+   D. Ensure the implementation handles all edge cases, validations, and error scenarios
+
+7. IMPLEMENTATION VERIFICATION:
+   Before proceeding, verify ALL items:
+   
+   COMMON VERIFICATIONS:
+   [ ] Domain object extends correct parent class
+   [ ] All abstract methods implemented
+   [ ] Repository queries actual data (no hardcoded values)
+   [ ] Authentication properly configured
+   [ ] TypeScript compilation passes (yarn tsc --noEmit)
+   [ ] HTTP test files created for ALL endpoints
+   [ ] Unit tests MANDATORY - Must create tests for:
+       [ ] Use case tests (*.test.ts or *.spec.ts)
+       [ ] Service tests (*.test.ts or *.spec.ts)
+       [ ] Repository tests (*.test.ts or *.spec.ts)
+       [ ] Controller tests (*.test.ts or *.spec.ts)
+   [ ] All unit tests pass when running test command
+
+8. After successful local implementation and testing:
+   - Clean up any backup files: rm -f src/api.ts.backup
+   - Stage all implemented files: git add .
+   - Commit with descriptive message:
+     feat: Implement \${NameOfUseCase} endpoint $endpoint_id
+     
+     - Added \${useCaseMethods} use case
+     - Added \${serviceMethods} service functions  
+     - Added \${repositoryMethods} repository functions
+     - Added \${controllerName} controller
+     - Updated src/api.ts with endpoint mapping
+     - Added HTTP test file
+     - Added unit tests for all layers
+     - TypeScript checks passed, all tests implemented
+   - Track commit for rollback: git reset --hard HEAD~1
+
+9. Push the implemented code to remote origin:
+   - Push branch: git push origin feature/implement-$endpoint_id
+   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
+
+10. Create a pull request targeting the $BASE_BRANCH branch (or current base branch):
+   - Target branch: $BASE_BRANCH (or the base branch that was checked out)
+   - Title: '[Backend]$endpoint_id \${restAPIMethod} \${endpointPath} \${useCaseName} - IMPLEMENTED'
+   - Body should include:
+     * Brief description of the use case
+     * REST API Method: \${restAPIMethod}
+     * Endpoint Path: \${endpointPath}
+     * ✅ IMPLEMENTATION COMPLETED locally
+     * Components implemented:
+       - ✅ Use Case: \${useCaseMethods}
+       - ✅ Service: \${serviceMethods}
+       - ✅ Repository: \${repositoryMethods}
+       - ✅ Controller: \${controllerName}
+       - ✅ API Mapping: Updated src/api.ts
+       - ✅ HTTP Test: \${HTTP_METHOD}_\${endpoint_description}.http
+       - ✅ Unit tests: All layers tested
+     * Testing status:
+       - ✅ TypeScript compilation: PASSED
+       - ✅ Unit tests: PASSED
+       - ✅ HTTP endpoint tests: VERIFIED
+     * Base branch: $CURRENT_BASE_BRANCH
+     * Ready for code review and merge
+   - Track PR creation for rollback (save PR number and URL)
+
+11. IMPORTANT: Save the PR information for future reference:
+    - Endpoint ID: $endpoint_id
+    - PR Branch: feature/implement-$endpoint_id
+    - PR URL: [save the actual PR URL]
+    - Destination: $md_destination
+
+ROLLBACK LOGGING: At the end, print a summary of all rollback commands that would undo the operations:
+- File operations (rm commands)
+- Directory operations (rmdir commands)  
+- Git operations (branch deletion, reset commands, remote deletion)
+- PR operations (PR number for manual closure)
+
+Please log progress at each step and report any errors encountered.
+Replace all \${...} placeholders with actual values from the spreadsheet.
+
+PROGRESS CHECKPOINTS (report after each):
+1. ✓ Spreadsheet data extracted with endpoint path: [show path]
+2. ✓ Pattern detected: [REQUEST/TRANSACTION/MANAGEMENT/QUERY]
+3. ✓ Domain analysis complete
+4. ✓ Base classes identified: [list them]
+5. ✓ Related endpoints found: [list them]
+6. ✓ MDC rules reviewed
+7. ✓ Implementation started
+8. ✓ All endpoints implemented: [list all created endpoints]
+9. ✓ TypeScript compilation passed
+10. ✓ PR created: [show URL]"
 
     # Check if confirmation is required for this endpoint
     if [ "$CONFIRM_EACH_ENDPOINT" = true ]; then
@@ -1088,7 +1027,7 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "false")"
         # Modify prompt to use existing markdown instead of creating new one
         PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
 
-$(generate_common_prompt "$endpoint_id" "$BASE_BRANCH" "$md_destination")
+$(generate_common_prompt "$endpoint_id" "$CURRENT_BASE_BRANCH" "$md_destination")
 
 EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destination/
 
@@ -1099,30 +1038,67 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
 5. Ensure implementation follows all MDC guidelines
 
 6. Create a new Git branch:
-   - First, checkout the base branch: $BASE_BRANCH
+   - First, checkout the base branch: $CURRENT_BASE_BRANCH
    - Create new branch from it: 'feature/implement-$endpoint_id'
    - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
 
-$(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
+7. IMPLEMENT THE CODE LOCALLY based on existing markdown instructions:
+
+   Implementation approach (implement first, test later):
+   
+   A. First, implement the domain objects and types:
+      - Create necessary interfaces and types
+   
+   B. Implement core components as specified in the existing markdown:
+      1. Use Case in src/useCase/\\${pathOfUseCase}.ts
+      2. Service functions in src/service/\\${pathOfService}.ts
+      3. Repository functions in src/repository/\\${pathOfRepository}.ts
+      4. Controller in src/controller/\\${pathOfController}.ts
+      5. Update src/api.ts to map endpoint base path to the new controller (prefer MultiEdit tool to avoid backup files)
+      6. HTTP test file in rest/\\${pathOfEndpoint}/\\${HTTP_METHOD}_\\${endpoint_description}.http
+      7. Unit tests for ALL components:
+         - Create unit tests in __tests__ directory or alongside source files
+         - Test files should be named: *.test.ts or *.spec.ts
+         - Write tests for all layers
+         - Follow unit-test-guideline.mdc if exists
+         - Ensure all tests pass before proceeding
+   
+   C. After ALL implementation is complete, validate and test:
+      1. If you modified prisma/schema.prisma, run 'yarn db:generate' to generate correct current schema types
+      2. Test HTTP endpoints using the created .http files
+      3. MANDATORY: Run unit tests to ensure they pass
+      4. FINAL STEP: Run 'yarn tsc --noEmit' to check for TypeScript errors
+   
+   D. Ensure the implementation handles all edge cases, validations, and error scenarios
+
+8. After successful local implementation and testing:
+   - Clean up any backup files: rm -f src/api.ts.backup
+   - Stage all implemented files: git add .
+   - Commit with descriptive message
+   - Track commit for rollback: git reset --hard HEAD~1
+
+9. Push the implemented code to remote origin:
+   - Push branch: git push origin feature/implement-$endpoint_id
+   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
+
+10. Create a pull request targeting the $CURRENT_BASE_BRANCH branch:
+    - Title: '[Backend]$endpoint_id \\${restAPIMethod} \\${endpointPath} \\${useCaseName} - IMPLEMENTED'
+    - Body should include implementation summary
+    - Track PR creation for rollback (save PR number and URL)
+
+Replace all \\${...} placeholders with actual values from the existing markdown file."
     fi
     
     # Clear rollback tracking for this endpoint
     clear_rollback
     
     # Execute Claude for this endpoint
-    if [ "$DRY_RUN" = true ]; then
-        print_info "[DRY RUN] Would execute Claude for endpoint: $endpoint_id"
-        print_info "[DRY RUN] Command: claude -p \"[PROMPT]\""
-        print_success "[DRY RUN] Would process endpoint: $endpoint_id"
-        PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
-    else
-        print_info "Executing Claude for endpoint: $endpoint_id"
-        
-        # Show configuration summary
-        print_info "Configuration:"
-        print_info "  Auto Rollback: $AUTO_ROLLBACK"
-        print_info "  Confirm Each: $CONFIRM_EACH_ENDPOINT"
-        print_info "  Base Branch: $BASE_BRANCH"
+    print_info "Executing Claude for endpoint: $endpoint_id"
+    
+    # Show configuration summary
+    print_info "Configuration:"
+    print_info "  Auto Rollback: $AUTO_ROLLBACK"
+    print_info "  Base Branch: $CURRENT_BASE_BRANCH"
         
         # Store current directory
         ORIGINAL_DIR=$(pwd)
@@ -1150,11 +1126,33 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
         print_info "Starting Claude local implementation for endpoint: $endpoint_id"
         print_info "Timeout set to 2 hours for implementation and testing..."
         print_info "Claude output will appear below in real-time:"
-        echo ""
+        print_info "========================================="
         
-        # Run Claude directly to show real-time output
-        timeout $CLAUDE_TIMEOUT claude -p "$PROMPT"
+        # Debug: Show exact command being run
+        print_info "[DEBUG] Running command: timeout $CLAUDE_TIMEOUT claude -p \"[PROMPT]\" (prompt length: ${#PROMPT} chars)"
+        
+        # Run Claude with real-time output
+        # Track start time for total execution time
+        START_TIME=$(date +%s)
+        
+        # Run Claude directly
+        claude -p "$PROMPT"
         CLAUDE_EXIT_CODE=$?
+        
+        # Debug: Check if command actually ran
+        print_info "[DEBUG] Claude command finished with exit code: $CLAUDE_EXIT_CODE"
+        if [ $CLAUDE_EXIT_CODE -eq 124 ]; then
+            print_error "Claude command timed out after $CLAUDE_TIMEOUT seconds"
+        elif [ $CLAUDE_EXIT_CODE -eq 127 ]; then
+            print_error "Claude command not found"
+        fi
+        
+        # Calculate and show total execution time
+        END_TIME=$(date +%s)
+        TOTAL_ELAPSED=$((END_TIME - START_TIME))
+        TOTAL_MINS=$((TOTAL_ELAPSED / 60))
+        TOTAL_SECS=$((TOTAL_ELAPSED % 60))
+        print_info "Total execution time: ${TOTAL_MINS}m ${TOTAL_SECS}s"
         
         echo ""
         print_info "Claude completed with exit code: $CLAUDE_EXIT_CODE"
@@ -1167,31 +1165,11 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
             print_success "Successfully processed endpoint: $endpoint_id"
             PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
             
-            # Ask user for PR URL since we can't capture it from direct output
-            read -p "Please enter the PR URL (or press Enter to skip): " PR_URL
-            if [ -z "$PR_URL" ]; then
-                PR_URL="Manual entry required"
-            fi
-            
             # Store endpoint information for future related PRs
-            PROCESSED_ENDPOINTS_TO_PR["$endpoint_id"]="$PR_URL|$md_destination|feature/implement-$endpoint_id"
+            PROCESSED_ENDPOINTS_TO_PR["$endpoint_id"]="success|$md_destination|feature/implement-$endpoint_id"
             
-            # Save successful endpoint for potential global rollback
+            # Save successful endpoint
             save_successful_endpoint "$endpoint_id"
-            
-            # Ask if user wants to keep the changes
-            if [ "$CONFIRM_EACH_ENDPOINT" = true ]; then
-                if ! ask_confirmation "Keep changes for endpoint $endpoint_id?" "y"; then
-                    print_warning "User requested rollback for endpoint: $endpoint_id"
-                    if [ "$AUTO_ROLLBACK" = true ]; then
-                        execute_rollback "$endpoint_id"
-                    else
-                        print_info "Auto-rollback disabled. Manual cleanup may be required."
-                    fi
-                    FAILED_COUNT=$((FAILED_COUNT + 1))
-                    PROCESSED_COUNT=$((PROCESSED_COUNT - 1))
-                fi
-            fi
         else
             print_error "Failed to process endpoint: $endpoint_id (exit code: $CLAUDE_EXIT_CODE)"
             FAILED_COUNT=$((FAILED_COUNT + 1))
@@ -1202,29 +1180,10 @@ $(generate_implementation_steps "$endpoint_id" "$BASE_BRANCH" "true")"
                 execute_rollback "$endpoint_id"
             else
                 print_warning "Auto-rollback disabled. Manual cleanup may be required."
-                print_info "To enable auto-rollback, remove the --no-rollback flag"
-            fi
-            
-            # Global rollback on any failure
-            if [ "$ROLLBACK_ALL_ON_ANY_FAILURE" = true ] && [ ${#ALL_SUCCESSFUL_ENDPOINTS[@]} -gt 0 ]; then
-                print_warning "ROLLBACK_ALL_ON_ANY_FAILURE is enabled!"
-                print_warning "Rolling back ALL successful endpoints due to this failure..."
-                execute_rollback_all
-                print_warning "All previous successful endpoints have been rolled back"
-                break
-            fi
-            
-            # Ask if user wants to continue with next endpoint
-            if [ "$CONFIRM_EACH_ENDPOINT" = true ]; then
-                if ! ask_confirmation "Continue with next endpoint?" "y"; then
-                    print_info "User requested to stop processing"
-                    break
-                fi
             fi
             
             print_warning "Continuing with next endpoint..."
         fi
-    fi
     
     # Add a small delay between endpoints to avoid rate limiting
     print_info "Waiting before processing next endpoint..."
@@ -1252,39 +1211,21 @@ if [ ${#PROCESSED_ENDPOINTS_TO_PR[@]} -gt 0 ]; then
     done
 fi
 
-# Global rollback at end option
-if [ "$ROLLBACK_ALL_AT_END" = true ] && [ ${#ALL_SUCCESSFUL_ENDPOINTS[@]} -gt 0 ]; then
+# Show successfully processed endpoints
+if [ ${#ALL_SUCCESSFUL_ENDPOINTS[@]} -gt 0 ]; then
     print_info ""
     print_info "Successfully processed endpoints: ${ALL_SUCCESSFUL_ENDPOINTS[*]}"
-    if ask_confirmation "Do you want to rollback ALL successful endpoints?"; then
-        print_warning "User requested global rollback..."
-        execute_rollback_all
-        print_success "All endpoints have been rolled back"
-    else
-        print_info "Keeping all successful endpoints"
-    fi
 fi
 
 # Show configuration used
 print_info ""
 print_info "Configuration used:"
 print_info "  Auto Rollback: $AUTO_ROLLBACK"
-print_info "  Confirm Each: $CONFIRM_EACH_ENDPOINT"
-print_info "  Dry Run: $DRY_RUN"
-print_info "  Rollback All On Failure: $ROLLBACK_ALL_ON_ANY_FAILURE"
-print_info "  Rollback All At End: $ROLLBACK_ALL_AT_END"
 print_info "  Use Cache: $USE_CACHE"
 print_info "  Cache Directory: $CACHE_DIR"
 
-if [ "$DRY_RUN" = true ]; then
-    print_info ""
-    print_info "This was a dry run. No actual changes were made."
-    print_info "Remove --dry-run flag to execute the operations."
-fi
-
-if [ $FAILED_COUNT -gt 0 ] && [ "$AUTO_ROLLBACK" = false ]; then
+if [ $FAILED_COUNT -gt 0 ]; then
     print_warning ""
-    print_warning "Some endpoints failed and auto-rollback was disabled."
-    print_warning "Manual cleanup may be required for failed endpoints."
-    print_warning "Check Git branches, created files, and PRs manually."
+    print_warning "Some endpoints failed. Auto-rollback was attempted."
+    print_warning "Check Git branches, created files, and PRs manually if needed."
 fi
