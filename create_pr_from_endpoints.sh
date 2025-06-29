@@ -3,7 +3,7 @@
 # Read endpoints from file, create PRs with specifications for each endpoint
 
 # Base branch configuration - can be overridden by environment variable
-BASE_BRANCH="${BASE_BRANCH:-feature/debit-card-replacement-request-base}"
+BASE_BRANCH="${BASE_BRANCH:-feature/implement-BE14-0201-1101}"
 
 # Colored message functions
 print_info() {
@@ -377,44 +377,59 @@ while IFS= read -r line || [ -n "$line" ]; do
     
     # Check for existing markdown
     md_hint=""
+    MD_FILE_EXISTS=false
     if [ -d "$md_destination" ] && find "$md_destination" -name "*.md" -type f | grep -q .; then
         md_hint="(existing markdown in $md_destination - use for implementation)"
+        MD_FILE_EXISTS=true
     fi
     
     # Create optimized prompt with explicit implementation commands
-    PROMPT="USECASE ID: $usecase_id → $md_destination
+    PROMPT=$(cat << EOF
+USECASE ID: $usecase_id → $md_destination
 SPREADSHEET: $SPREADSHEET_NAME/$WORKSHEET_NAME
 BASE: $CURRENT_BASE_BRANCH
 
 $SPREADSHEET_READING_RULES
 
-TASK: Extract UseCase ID $usecase_id from spreadsheet using EXACT matching, then implement the endpoint $md_hint
+TASK: Extract UseCase ID $usecase_id from spreadsheet using EXACT matching, create implementation plan as markdown, then implement
 
-MANDATORY IMPLEMENTATION STEPS:
-1. cd functions
-2. Read ALL .mdc rules from .cursor/rules/general/*.mdc
-3. Extract ALL rows where "UseCase ID" column (Column K) EXACTLY equals '$usecase_id'
+PHASE 1 - CREATE MARKDOWN IMPLEMENTATION PLAN:
+1. Extract ALL rows where "UseCase ID" column (Column K) EXACTLY equals '$usecase_id'
    - CRITICAL: Use EXACT string matching - '$usecase_id' must match the entire cell content
    - DO NOT match partial strings (e.g., 'BE14-0301-2101' should NOT match 'BE01-0301-2101')
    - Find ALL rows with this exact UseCase ID (may span multiple consecutive rows)
-4. Analyze the complete endpoint structure:
+2. Analyze the complete endpoint structure:
    - Extract the endpoint path from "Endpoint" column
    - Extract the HTTP method from "HTTP Method" column
    - Count total rows for this UseCase ID
    - List all services needed (from all rows)
    - Identify all repository methods
-5. Create branch: feature/implement-$usecase_id from $CURRENT_BASE_BRANCH
-6. Implement based on spreadsheet data and .mdc guidelines:
+3. Create markdown file in $md_destination/ with implementation plan:
+   - First ensure directory exists: mkdir -p $md_destination
+   - Filename: $md_destination/${usecase_id}.md
+   - Include all extracted data from spreadsheet
+   - Define implementation structure based on .mdc guidelines
+   - List all components to be created
+   - Include validation and testing requirements
+   - The markdown should serve as a complete blueprint for implementation
+
+PHASE 2 - IMPLEMENT BASED ON MARKDOWN PLAN:
+1. cd functions
+2. Read ALL .mdc rules from .cursor/rules/general/*.mdc
+3. Read the markdown file you just created
+4. Create branch: feature/implement-$usecase_id from $CURRENT_BASE_BRANCH
+5. Implement based on markdown plan and .mdc guidelines:
    - Let .mdc rules guide what files to create
    - May include: types, helpers, validators, domain objects, etc.
    - Ensure ALL services from ALL rows are implemented
    - Create all necessary components as determined by .mdc rules
    - Update api.ts appropriately with the endpoint path from spreadsheet
    - Create comprehensive tests per .mdc guidelines
-7. Validate: npx tsc --noEmit && yarn test
-8. Commit and create PR
+6. Validate: npx tsc --noEmit && yarn test
+7. Commit and create PR
 
 IMPLEMENTATION REQUIREMENTS:
+• First create markdown plan, then implement based on that plan
 • Follow ALL .mdc guidelines - they determine file structure
 • Implement ALL services and repositories found across ALL rows with the same UseCase ID
 • Use the exact endpoint path and HTTP method from the spreadsheet
@@ -423,7 +438,9 @@ IMPLEMENTATION REQUIREMENTS:
 • Zero TS errors, all tests pass
 • Use Write/MultiEdit tools
 
-Think smart, implement completely, report briefly."
+Think smart, plan thoroughly, implement completely, report briefly.
+EOF
+)
 
     # Check if confirmation is required for this usecase
     if [ "$CONFIRM_EACH_ENDPOINT" = true ]; then
@@ -454,9 +471,12 @@ Think smart, implement completely, report briefly."
         print_info "========================================="
         print_info "Will implement code based on existing markdown file..."
         # Modify prompt to use existing markdown instead of creating new one
+        # First generate the common prompt content
+        COMMON_PROMPT=$(generate_common_prompt "$usecase_id" "$CURRENT_BASE_BRANCH" "$md_destination")
+        
         PROMPT="Please perform the following tasks for UseCase ID: $usecase_id
 
-$(generate_common_prompt "$usecase_id" "$CURRENT_BASE_BRANCH" "$md_destination")
+$COMMON_PROMPT
 
 EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destination/
 
@@ -479,19 +499,18 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
       - Create necessary interfaces and types
    
    B. Implement core components as specified in the existing markdown:
-      1. Use Case in src/useCase/\\${pathOfUseCase}.ts
-      2. Service functions in src/service/\\${pathOfService}.ts
-      3. Repository functions in src/repository/\\${pathOfRepository}.ts
-      4. Controller in src/controller/\\${pathOfController}.ts
+      1. Use Case in src/useCase/\${pathOfUseCase}.ts
+      2. Service functions in src/service/\${pathOfService}.ts
+      3. Repository functions in src/repository/\${pathOfRepository}.ts
+      4. Controller in src/controller/\${pathOfController}.ts
       5. Update src/api.ts to map endpoint base path to the new controller (prefer MultiEdit tool to avoid backup files)
-      6. HTTP test file in rest/\\${pathOfEndpoint}/\\${HTTP_METHOD}_\\${endpoint_description}.http
+      6. HTTP test file in rest/\${pathOfEndpoint}/\${HTTP_METHOD}_\${endpoint_description}.http
       7. Unit tests for ALL components:
          - Create unit tests in __tests__ directory or alongside source files
          - Test files should be named: *.test.ts or *.spec.ts
          - Write tests for useCase, service, repository
          - Follow unit-test-guideline.mdc if exists
          - Ensure all tests pass before proceeding
-      
       8. Integration tests for controller:
          - Create integration test: [controller]/__tests__/[controller].integration.test.ts
          - Test all endpoints with authentication, error handling, response formats
@@ -509,7 +528,7 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
 8. After successful local implementation and testing:
    - Clean up any backup files: rm -f src/api.ts.backup
    - Stage all implemented files: git add .
-   - Commit with descriptive message
+   - Commit all files changed with descriptive message
    - Track commit for rollback: git reset --hard HEAD~1
 
 9. Push the implemented code to remote origin:
@@ -517,18 +536,18 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
    - Track push for rollback: git push origin --delete feature/implement-$usecase_id
 
 10. Create a pull request targeting the $CURRENT_BASE_BRANCH branch:
-    - Title: '[Backend]$usecase_id \\${httpMethod} \\${endpoint} \\${useCaseName} - IMPLEMENTED'
+    - Title: '[Backend]$usecase_id \${httpMethod} \${endpoint} \${useCaseName} - IMPLEMENTED'
     - Body should include implementation summary
     - Track PR creation for rollback (save PR number and URL)
     - Use the exact HTTP method and endpoint path extracted from the spreadsheet
 
-Replace all \\${...} placeholders with actual values from the existing markdown file."
+Replace all \${...} placeholders with actual values from the existing markdown file."
     fi
     
     # Execute Claude - optimized
     print_info "Processing: $usecase_id"
     
-    if claude -p "$PROMPT"; then
+    if claude --print --dangerously-skip-permissions "$PROMPT"; then
         print_success "✓ $usecase_id"
         PROCESSED_ENDPOINTS["$usecase_id"]="$md_destination"
         ((SUCCESS_COUNT++))
