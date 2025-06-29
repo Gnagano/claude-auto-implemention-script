@@ -35,10 +35,10 @@ find_related_branch() {
     local current_destination="$1"
     local parent_path=$(dirname "$current_destination")
     
-    for endpoint in "${!PROCESSED_ENDPOINTS[@]}"; do
-        local endpoint_dest="${PROCESSED_ENDPOINTS[$endpoint]}"
-        if [[ "$endpoint_dest" == "$parent_path"/* ]] && [[ "$endpoint_dest" != "$current_destination" ]]; then
-            echo "feature/implement-$endpoint"
+    for usecase in "${!PROCESSED_ENDPOINTS[@]}"; do
+        local usecase_dest="${PROCESSED_ENDPOINTS[$usecase]}"
+        if [[ "$usecase_dest" == "$parent_path"/* ]] && [[ "$usecase_dest" != "$current_destination" ]]; then
+            echo "feature/implement-$usecase"
             return
         fi
     done
@@ -51,7 +51,8 @@ find_related_branch() {
 usage() {
     echo "Usage: $0 <endpoints_file>"
     echo "Config: CONFIG:SPREADSHEET_NAME=name, CONFIG:WORKSHEET_NAME=name, CONFIG:REPO_PATH=path"
-    echo "Format: endpoint_id|destination_folder"
+    echo "Format: usecase_id|destination_folder"
+    echo "Example: BE14-0201-1201|vault/useCase/debit-cards/requests/replacement"
     echo "Requirements: .mcp.json in repo root, .mdc files in functions/.cursor/rules/general/"
     exit ${1:-0}
 }
@@ -214,51 +215,76 @@ print_info "========================================="
 SPREADSHEET_READING_RULES=$(cat << 'RULES_EOF'
 CRITICAL SPREADSHEET READING RULES:
 
-1. UseCase Grouping:
-   - Group rows by the value in the "UseCase ID" column.
-   - All rows sharing the same UseCase ID belong to the same use case definition.
+1. EXACT MATCHING REQUIREMENT:
+   - Find rows where the "UseCase ID" column (Column K) EXACTLY equals the target value
+   - Use EXACT string matching - no partial or fuzzy matches
+   - For example: 'BE14-0301-2101' should NOT match 'BE01-0301-2101'
+   - The match must be for the entire cell content
 
-2. Reading logic per UseCase ID group:
+2. UseCase Grouping:
+   - Group ALL rows that have the EXACT SAME UseCase ID
+   - All rows sharing the same UseCase ID belong to the same use case definition
+   - A single UseCase ID may span multiple consecutive rows
+
+3. Extract Endpoint Information (from first row of the group):
+   - "Endpoint" column (Column H): Contains the REST API endpoint path
+   - "HTTP Method" column (Column G): Contains the HTTP method (GET, POST, PUT, DELETE, etc.)
+   - These define the actual endpoint that will be implemented
+
+4. Reading logic per UseCase ID group:
    - First row contains:
      • "UseCase": descriptive name
      • "UseCase (Methods)": main method name
      • "params": parameters in code-style format (e.g., JSON or TypeScript)
-   - Subsequent rows may leave these columns blank or merged → treat as continuation.
+   - Subsequent rows may leave these columns blank or merged → treat as continuation
 
-3. For each group:
-   - Collect all values under:
-     • "Service" and "Service Method"
-     • "IRepository" and "Repository impl" (if present)
-   - Ensure no duplicates when aggregating.
+5. For each group, aggregate ALL services and repositories:
+   - Collect ALL values from "Service" and "Service(Methods)" columns from ALL rows
+   - Collect ALL values from "IRepository" and "Repository" columns from ALL rows
+   - Each row may contain different services/repositories - collect them all
+   - Ensure no duplicates when aggregating
 
-4. Filter rules:
-   - Only include rows where "Status" is one of: REVIEWED, IMPLEMENTED, or WAITING_REVIEW.
-   - Skip any row with missing or invalid UseCase ID.
+6. Column header names (not positions) must be used to extract data:
+   - Do not rely on fixed column letters (like A, B, C)
+   - Match columns strictly based on their header name
 
-5. Column header names (not positions) must be used to extract data:
-   - Do not rely on fixed column letters (like A, B, C).
-   - Match columns strictly based on their header name (case-insensitive match is acceptable).
+7. Do not infer or guess beyond what the sheet provides:
+   - No external logic should be assumed
+   - If a value is blank and no previous context exists, skip it
 
-6. Do not infer or guess beyond what the sheet provides.
-   - No external logic should be assumed.
-   - If a value is blank and no previous context exists, skip or flag as incomplete.
-
-EXAMPLE OUTPUT PER USECASE ID (YAML or JSON):
-  usecase_id: BE14-0301-2201
-  usecase_name: DebitCardReplacementRequestHyperPhysicalConfirmShippingInformationUseCase
-  method: confirm
+EXAMPLE OUTPUT FOR BE14-0301-2101 (which spans multiple rows):
+  usecase_id: BE14-0301-2101
+  endpoint: /v1/debit-cards/requests/replacements/hyper/physical/payment
+  http_method: POST
+  usecase_name: DebitCardReplacementRequestHyperPhysicalPayReplacementFeeUseCase
+  method: payReplacementFee
   params:
     - debitCardReplacementRequestId: string
     - user: User
   services:
-    - ShippingAddressQueryService.confirm
-    - DebitCardReplacementRequestHyperPhysicalUpdateService.confirm
+    - DebitCardReplacementRequestHyperPhysicalQueryService.findPendingReplacementFeeById
+    - DebitCardQueryService.findByGuaranteedOwner
+    - BankAccountQueryService.findByIdByGuaranteedOwner
+    - CustomerVerifiedQueryService.findCustomersVerifiedByBankAccount
+    - DebitCardProductQueryService.guaranteeActiveById
+    - BankWithdrawalCreateService.create
+    - BankAccountUpdateService.updateBySpotTransaction
+    - DebitCardReplacementRequestHyperPhysicalUpdateService.payIssuanceFee
+    - DebitCardReplacementRequestBankTransactionCreateService.createFromTransaction
+  repositories:
+    - IDebitCardReplacementRequestHyperPhysicalRepository.findById
+    - DebitCardReplacementRequestHyperPhysicalMySQLPrisma
+    - IDebitCardRepository.findRawByIdWithUserIds
+    - DebitCardMySQLPrisma
+    - IBankAccountRepository.findById
+    - BankAccountMySQLPrisma
+    - [... and all other repositories from all rows]
 RULES_EOF
 )
 
 # Function to generate common prompt parts
 generate_common_prompt() {
-    local endpoint_id="$1"
+    local usecase_id="$1"
     local base_branch="$2"
     local md_destination="$3"
     
@@ -271,7 +297,6 @@ cd functions
 
 After changing to functions directory, you can run package manager commands directly.
 NOTE: When in functions directory, file paths should be relative to functions (e.g., src/controller/... not functions/src/controller/...)
-Claude should choose the best available package manager (yarn/npm/pnpm) and commands based on project setup.
 Track all operations for potential rollback. For each operation that creates or modifies something, log the rollback command.
 
 CRITICAL: FOLLOW ALL .MDC GUIDELINES
@@ -279,32 +304,25 @@ Before starting ANY implementation:
 1. Read and follow ALL .mdc files in functions/.cursor/rules/general/*.mdc
 2. Create a checklist from the MDC rules to follow during implementation
 
-SMART TOOL SELECTION (Hybrid Yarn + Direct Commands):
-This project uses YARN as the primary package manager. Use this hybrid approach:
+This project uses Yarn as the primary package manager. Claude Code should follow a hybrid strategy for command execution:
 
-PRIMARY: Use Yarn for project-specific commands:
+Use Yarn for project-specific scripts:
 - yarn test           # Use project's test configuration
 - yarn build          # Use project's build scripts
-- yarn typecheck      # If script exists in package.json
 - yarn lint           # Use project's linting setup
 
-OPTIMIZATION: Use direct commands for faster execution:
-- npx prisma generate    # Faster than yarn db:generate (saves 2-4 seconds)
-- npx tsc --noEmit      # Faster than yarn tsc --noEmit (saves 2-3 seconds)
-- Direct tool commands when yarn wrapper adds overhead
-
-Decision Logic:
-1. Check if yarn script exists in package.json first
-2. If yarn script exists and is project-specific → use yarn
-3. If direct command is significantly faster → use npx/direct
-4. For Prisma specifically → always use npx prisma generate
+Use direct commands for speed and simplicity:
+- npx prisma generate    # faster than yarn db:generate
+- npx tsc --noEmit    # faster than yarn watch
+- Prefer direct tool commands when Yarn introduces unnecessary overhead
 
 MANDATORY QUALITY REQUIREMENTS (non-negotiable):
-1. ZERO TypeScript compilation errors - prefer npx tsc --noEmit for speed
-2. ALL unit tests MUST pass - use yarn test for project consistency  
-3. Implementation must follow all .mdc guidelines
-4. HTTP test files must be created and functional
-5. If schema changes → use npx prisma generate for speed
+1. ZERO TypeScript compilation errors
+2. ALL unit tests MUST pass
+3. ALL integration tests MUST pass
+4. Implementation must follow all .mdc guidelines
+5. HTTP test files must be created and functional
+6. If schema changes → generate schema by npx prisma generate
 EOF
 }
 
@@ -326,31 +344,31 @@ while IFS= read -r line || [ -n "$line" ]; do
         continue
     fi
     
-    # Parse endpoint and destination
+    # Parse usecase_id and destination
     if [[ "$line" =~ \| ]]; then
-        endpoint_id="${line%%|*}"
+        usecase_id="${line%%|*}"
         md_destination="${line#*|}"
     else
         print_error "Invalid format for line: $line"
-        print_error "Expected format: endpoint_id|md_destination_folder"
+        print_error "Expected format: usecase_id|md_destination_folder"
         FAILED_COUNT=$((FAILED_COUNT + 1))
         continue
     fi
     
     # Trim whitespace
-    endpoint_id=$(echo "$endpoint_id" | xargs)
+    usecase_id=$(echo "$usecase_id" | xargs)
     md_destination=$(echo "$md_destination" | xargs)
     
     # Validate parsed values
-    if [ -z "$endpoint_id" ] || [ -z "$md_destination" ]; then
-        print_error "Invalid endpoint or destination in line: $line"
+    if [ -z "$usecase_id" ] || [ -z "$md_destination" ]; then
+        print_error "Invalid usecase_id or destination in line: $line"
         FAILED_COUNT=$((FAILED_COUNT + 1))
         continue
     fi
     
     ENDPOINT_COUNT=$((ENDPOINT_COUNT + 1))
     print_info "========================================="
-    print_info "Processing endpoint $ENDPOINT_COUNT/$TOTAL_ENDPOINTS: $endpoint_id"
+    print_info "Processing UseCase $ENDPOINT_COUNT/$TOTAL_ENDPOINTS: $usecase_id"
     print_info "  Destination folder: $md_destination"
     
     # Find related branch for this endpoint
@@ -364,46 +382,53 @@ while IFS= read -r line || [ -n "$line" ]; do
     fi
     
     # Create optimized prompt with explicit implementation commands
-    PROMPT="ENDPOINT: $endpoint_id → $md_destination
+    PROMPT="USECASE ID: $usecase_id → $md_destination
 SPREADSHEET: $SPREADSHEET_NAME/$WORKSHEET_NAME
 BASE: $CURRENT_BASE_BRANCH
 
 $SPREADSHEET_READING_RULES
 
-TASK: Extract UseCase ID $endpoint_id from spreadsheet, then implement it $md_hint
+TASK: Extract UseCase ID $usecase_id from spreadsheet using EXACT matching, then implement the endpoint $md_hint
 
 MANDATORY IMPLEMENTATION STEPS:
 1. cd functions
 2. Read ALL .mdc rules from .cursor/rules/general/*.mdc
-3. Extract ALL rows where column K = '$endpoint_id' from spreadsheet
+3. Extract ALL rows where "UseCase ID" column (Column K) EXACTLY equals '$usecase_id'
+   - CRITICAL: Use EXACT string matching - '$usecase_id' must match the entire cell content
+   - DO NOT match partial strings (e.g., 'BE14-0301-2101' should NOT match 'BE01-0301-2101')
+   - Find ALL rows with this exact UseCase ID (may span multiple consecutive rows)
 4. Analyze the complete endpoint structure:
+   - Extract the endpoint path from "Endpoint" column
+   - Extract the HTTP method from "HTTP Method" column
    - Count total rows for this UseCase ID
    - List all services needed (from all rows)
    - Identify all repository methods
-5. Create branch: feature/implement-$endpoint_id from $CURRENT_BASE_BRANCH
+5. Create branch: feature/implement-$usecase_id from $CURRENT_BASE_BRANCH
 6. Implement based on spreadsheet data and .mdc guidelines:
    - Let .mdc rules guide what files to create
    - May include: types, helpers, validators, domain objects, etc.
    - Ensure ALL services from ALL rows are implemented
    - Create all necessary components as determined by .mdc rules
-   - Update api.ts appropriately
+   - Update api.ts appropriately with the endpoint path from spreadsheet
    - Create comprehensive tests per .mdc guidelines
 7. Validate: npx tsc --noEmit && yarn test
 8. Commit and create PR
 
 IMPLEMENTATION REQUIREMENTS:
 • Follow ALL .mdc guidelines - they determine file structure
-• Implement ALL rows with same UseCase ID
+• Implement ALL services and repositories found across ALL rows with the same UseCase ID
+• Use the exact endpoint path and HTTP method from the spreadsheet
+• Each row may contain different services - implement them ALL
 • Don't add operations not in spreadsheet
 • Zero TS errors, all tests pass
 • Use Write/MultiEdit tools
 
 Think smart, implement completely, report briefly."
 
-    # Check if confirmation is required for this endpoint
+    # Check if confirmation is required for this usecase
     if [ "$CONFIRM_EACH_ENDPOINT" = true ]; then
-        if ! ask_confirmation "Process endpoint $endpoint_id?"; then
-            print_info "Skipping endpoint: $endpoint_id"
+        if ! ask_confirmation "Process UseCase $usecase_id?"; then
+            print_info "Skipping UseCase: $usecase_id"
             continue
         fi
     fi
@@ -424,14 +449,14 @@ Think smart, implement completely, report briefly."
     if [ "$MD_FILE_EXISTS" = true ]; then
         echo ""
         print_info "========================================="
-        print_info "EXISTING MARKDOWN FOUND FOR ENDPOINT: $endpoint_id"
+        print_info "EXISTING MARKDOWN FOUND FOR USECASE: $usecase_id"
         print_info "Destination: $md_destination"
         print_info "========================================="
         print_info "Will implement code based on existing markdown file..."
         # Modify prompt to use existing markdown instead of creating new one
-        PROMPT="Please perform the following tasks for endpoint ID: $endpoint_id
+        PROMPT="Please perform the following tasks for UseCase ID: $usecase_id
 
-$(generate_common_prompt "$endpoint_id" "$CURRENT_BASE_BRANCH" "$md_destination")
+$(generate_common_prompt "$usecase_id" "$CURRENT_BASE_BRANCH" "$md_destination")
 
 EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destination/
 
@@ -443,8 +468,8 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
 
 6. Create a new Git branch:
    - First, checkout the base branch: $CURRENT_BASE_BRANCH
-   - Create new branch from it: 'feature/implement-$endpoint_id'
-   - Track branch creation for rollback: git branch -D feature/implement-$endpoint_id
+   - Create new branch from it: 'feature/implement-$usecase_id'
+   - Track branch creation for rollback: git branch -D feature/implement-$usecase_id
 
 7. IMPLEMENT THE CODE LOCALLY based on existing markdown instructions:
 
@@ -463,15 +488,21 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
       7. Unit tests for ALL components:
          - Create unit tests in __tests__ directory or alongside source files
          - Test files should be named: *.test.ts or *.spec.ts
-         - Write tests for all layers
+         - Write tests for useCase, service, repository
          - Follow unit-test-guideline.mdc if exists
          - Ensure all tests pass before proceeding
+      
+      8. Integration tests for controller:
+         - Create integration test: [controller]/__tests__/[controller].integration.test.ts
+         - Test all endpoints with authentication, error handling, response formats
+         - Follow patterns defined in controller-integration-test-pattern.mdc guidelines
    
-   C. After ALL implementation is complete, validate and test:
+   C. MANDATORY: After ALL implementation is complete, validate and test:
       1. If you modified prisma/schema.prisma, run: npx prisma generate
       2. Test HTTP endpoints using the created .http files
-      3. MANDATORY: Ensure all unit tests pass: yarn test
-      4. FINAL STEP: Ensure NO TypeScript compilation errors: npx tsc --noEmit
+      3. Ensure all unit tests pass: yarn test
+      4. Ensure all integration tests pass: yarn test *.integration.test.ts
+      5. FINAL STEP: Ensure NO TypeScript compilation errors: npx tsc --noEmit
    
    D. Ensure the implementation handles all edge cases, validations, and error scenarios
 
@@ -482,27 +513,28 @@ EXISTING MARKDOWN FILE FOUND: There is already a markdown file in $md_destinatio
    - Track commit for rollback: git reset --hard HEAD~1
 
 9. Push the implemented code to remote origin:
-   - Push branch: git push origin feature/implement-$endpoint_id
-   - Track push for rollback: git push origin --delete feature/implement-$endpoint_id
+   - Push branch: git push origin feature/implement-$usecase_id
+   - Track push for rollback: git push origin --delete feature/implement-$usecase_id
 
 10. Create a pull request targeting the $CURRENT_BASE_BRANCH branch:
-    - Title: '[Backend]$endpoint_id \\${restAPIMethod} \\${endpointPath} \\${useCaseName} - IMPLEMENTED'
+    - Title: '[Backend]$usecase_id \\${httpMethod} \\${endpoint} \\${useCaseName} - IMPLEMENTED'
     - Body should include implementation summary
     - Track PR creation for rollback (save PR number and URL)
+    - Use the exact HTTP method and endpoint path extracted from the spreadsheet
 
 Replace all \\${...} placeholders with actual values from the existing markdown file."
     fi
     
     # Execute Claude - optimized
-    print_info "Processing: $endpoint_id"
+    print_info "Processing: $usecase_id"
     
     if claude -p "$PROMPT"; then
-        print_success "✓ $endpoint_id"
-        PROCESSED_ENDPOINTS["$endpoint_id"]="$md_destination"
+        print_success "✓ $usecase_id"
+        PROCESSED_ENDPOINTS["$usecase_id"]="$md_destination"
         ((SUCCESS_COUNT++))
     else
-        print_error "✗ $endpoint_id failed"
-        print_info "Cleanup: git reset --hard HEAD~1; git branch -D feature/implement-$endpoint_id 2>/dev/null"
+        print_error "✗ $usecase_id failed"
+        print_info "Cleanup: git reset --hard HEAD~1; git branch -D feature/implement-$usecase_id 2>/dev/null"
         ((FAILED_COUNT++))
     fi
     
